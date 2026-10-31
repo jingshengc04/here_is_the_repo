@@ -154,7 +154,7 @@ Analyze the full conversation history. Extract the current known intake values a
     latest_user_msg = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
     if re.search(r"\b(buy|sell|trade|purchase|execute)\b", latest_user_msg, re.IGNORECASE):
         reply_lower = reply.lower()
-        if not ("place trade" in reply_lower or "place trades" in reply_lower or "doesn't place trades" in reply_lower or "does not place trades" in reply_lower or "cannot place trades" in reply_lower):
+        if "trade" not in reply_lower and "advice" not in reply_lower:
             reply = "This tool researches and backtests portfolios, but does not place trades or give financial advice. " + reply
 
     # Ensure replies are concise (<= 2 sentences)
