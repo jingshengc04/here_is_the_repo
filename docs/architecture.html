@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portfolio Research Agents: How it works</title>
+<style>
+  :root{
+    --ink:#16181d; --muted:#5b6170; --line:#e3e5ea; --bg:#fafaf8; --card:#fff;
+    --flash:#1a73e8; --flash-bg:#e8f0fe; --argon:#7b3fe4; --argon-bg:#f1eafd;
+    --py:#0b8043; --py-bg:#e6f4ea; --vt:#b06000; --vt-bg:#fef3e0; --bad:#c5221f; --bad-bg:#fce8e6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+  main{max-width:1120px;margin:0 auto;padding:40px 24px 80px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px;letter-spacing:-.01em}
+  h2{font-size:20px;margin:48px 0 6px;letter-spacing:-.01em}
+  h2 small{font-weight:500;color:var(--muted);font-size:14px;margin-left:8px}
+  p.lead{color:var(--muted);font-size:17px;margin:0 0 20px;max-width:780px}
+  .sub{color:var(--muted);margin:0 0 16px;max-width:820px}
+  code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;background:#f0f1f4;padding:1px 5px;border-radius:4px}
+  .legend{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0 4px}
+  .tag{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:3px 9px;border-radius:999px;white-space:nowrap}
+  .t-flash{color:var(--flash);background:var(--flash-bg)} .t-argon{color:var(--argon);background:var(--argon-bg)}
+  .t-py{color:var(--py);background:var(--py-bg)} .t-vt{color:var(--vt);background:var(--vt-bg)} .t-bad{color:var(--bad);background:var(--bad-bg)}
+  .t-ui{color:#3c4043;background:#eceef1}
+
+  /* Pipeline */
+  .pipe{display:grid;grid-template-columns:repeat(6,1fr);gap:0;margin-top:18px;align-items:stretch}
+  .stage{position:relative;padding:0 14px}
+  .stage:not(:last-child)::after{content:"";position:absolute;right:-7px;top:50%;width:14px;height:14px;border-top:2px solid #b9bec8;border-right:2px solid #b9bec8;transform:translateY(-50%) rotate(45deg)}
+  .stage h4{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
+  .node{background:var(--card);border:1px solid var(--line);border-left:4px solid var(--c,#999);border-radius:10px;padding:10px 12px;margin-bottom:8px;box-shadow:0 1px 0 rgba(0,0,0,.03)}
+  .node b{display:block;font-size:14px}
+  .node span{display:block;font-size:12px;color:var(--muted);line-height:1.4}
+  .n-flash{--c:var(--flash)} .n-argon{--c:var(--argon)} .n-py{--c:var(--py)} .n-ui{--c:#80868b}
+  .loop{margin:14px 0 0;padding:10px 14px;border:1.5px dashed var(--bad);border-radius:10px;background:var(--bad-bg);color:#7a1714;font-size:13.5px}
+  @media (max-width:900px){.pipe{grid-template-columns:1fr}.stage:not(:last-child)::after{right:auto;left:50%;top:auto;bottom:-10px;transform:translateX(-50%) rotate(135deg)}.stage{padding:0 0 18px}}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13.5px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:#f4f5f7;font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:600}
+  tr:last-child td{border-bottom:0}
+  td.k{font-weight:600;white-space:nowrap}
+  .num{font-variant-numeric:tabular-nums}
+
+  /* Cards */
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card h3{margin:0 0 6px;font-size:15px}
+  .card p,.card li{font-size:13.5px;color:#30343c;margin:0}
+  .card ul{margin:6px 0 0;padding-left:18px}
+  .card li{margin:3px 0}
+  .big{font-size:26px;font-weight:700;letter-spacing:-.02em}
+  .ok{color:var(--py);font-weight:700}
+  .flow-data{display:grid;grid-template-columns:1fr 40px 1fr 40px 1fr;align-items:center;gap:0;margin-top:10px}
+  .flow-data .arrow{text-align:center;color:#9aa0a6;font-size:22px}
+  @media (max-width:900px){.flow-data{grid-template-columns:1fr}.flow-data .arrow{transform:rotate(90deg)}}
+  .callout{background:#fff;border:1px solid var(--line);border-left:4px solid var(--argon);border-radius:10px;padding:14px 16px;margin-top:14px;font-size:14px}
+  footer{margin-top:56px;color:var(--muted);font-size:12.5px}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Portfolio Research Agents</h1>
+<p class="lead">You chat with an onboarding agent, and a team of Gemini agents researches the market. They build a two-level portfolio (stocks / crypto / gold → specific tickers), <b>backtest it on real data in Google's code sandbox</b>, and a Verifier rejects it if the risk doesn't match what you asked for.</p>
+
+<div class="legend">
+  <span class="tag t-flash">● Gemini 3.8 Flash</span>
+  <span class="tag t-argon">● Gemini 4 Argon</span>
+  <span class="tag t-py">● Deterministic Python (no LLM)</span>
+  <span class="tag t-vt">● Inherited from Vibe-Trading</span>
+  <span class="tag t-ui">● Frontend (Next.js)</span>
+</div>
+
+<!-- ============ PIPELINE ============ -->
+<h2>1 · The pipeline <small>one run takes about 2–3 minutes and about 10–13 Gemini calls</small></h2>
+<p class="sub">Left to right. The four research agents in the middle run <b>in parallel</b>. Every box streams its progress to the UI live over SSE.</p>
+
+<div class="pipe">
+  <div class="stage">
+    <h4>① Onboard</h4>
+    <div class="node n-flash"><b>Intake agent</b><span>Chats until it knows the amount, horizon and risk level</span></div>
+    <div class="node n-ui"><b>Confirm card</b><span>The user checks "$10k · 2y · Moderate" → <b>Run</b></span></div>
+  </div>
+  <div class="stage">
+    <h4>② Discover</h4>
+    <div class="node n-flash"><b>Discovery</b><span>Google Search → 4–6 stocks and 2–3 coins. Gold is always <code>GLD</code></span></div>
+  </div>
+  <div class="stage">
+    <h4>③ Research ∥</h4>
+    <div class="node n-flash"><b>Financials</b><span>SEC filings → sandbox computes ratios → 1–10 score</span></div>
+    <div class="node n-flash"><b>Landscape</b><span>Search → competitors and market position</span></div>
+    <div class="node n-flash"><b>News</b><span>Search → recent catalysts and risks</span></div>
+    <div class="node n-flash"><b>Social</b><span>Search → Reddit/X sentiment</span></div>
+  </div>
+  <div class="stage">
+    <h4>④ Allocate</h4>
+    <div class="node n-py"><b>Risk parity baseline</b><span>Vendored optimizer suggests weights from price volatility</span></div>
+    <div class="node n-argon"><b>Orchestrator</b><span>All findings + baseline + intake → class % and ticker %</span></div>
+  </div>
+  <div class="stage">
+    <h4>⑤ Backtest</h4>
+    <div class="node n-flash"><b>Sandbox backtest</b><span>5y weekly CSV → Gemini code execution computes the returns</span></div>
+    <div class="node n-py"><b>Independent recompute</b><span>pandas + vendored risk x-ray + bootstrap Sharpe CI</span></div>
+  </div>
+  <div class="stage">
+    <h4>⑥ Verify</h4>
+    <div class="node n-py"><b>Hard checks</b><span>Drawdown limit, CI, weights, concentration, numbers match</span></div>
+    <div class="node n-argon"><b>Verifier</b><span>Explains any failure → <code>changesRequested</code></span></div>
+    <div class="node n-ui"><b>Report</b><span>Pie, holdings, evidence, backtest chart</span></div>
+  </div>
+</div>
+<div class="loop">↺ <b>The verification loop (the demo moment):</b> if any hard check fails in round 1, the Verifier's <code>changesRequested</code> go back to the Orchestrator, which rebalances. Steps ⑤ and ⑥ then run again. <b>Maximum 2 rounds.</b> The UI shows round 1 greyed out with the reasons, then round 2.</div>
+
+<!-- ============ AGENTS ============ -->
+<h2>2 · The agents</h2>
+<p class="sub">Each agent is <b>one Gemini call</b> covering all its symbols at once, not a long agent loop. That's what keeps a run at about 2–3 minutes.</p>
+<table>
+  <thead><tr><th>Agent</th><th>Model</th><th>Gemini tools</th><th>Input → Output</th><th>Prompt adapted from (Vibe-Trading)</th></tr></thead>
+  <tbody>
+    <tr><td class="k">Intake</td><td><span class="tag t-flash">3.8 Flash</span></td><td>schema</td><td>chat history → <code>IntakeTurn</code> (reply + draft intake)</td><td>—</td></tr>
+    <tr><td class="k">Discovery</td><td><span class="tag t-flash">3.8 Flash</span></td><td>Google Search + schema</td><td>intake + theme → candidate symbols + findings + sources</td><td><code>global_equities_desk</code>, <code>crypto_research_lab</code></td></tr>
+    <tr><td class="k">Financials</td><td><span class="tag t-flash">3.8 Flash</span></td><td><b>code execution</b> + schema</td><td>SEC TTM figures + P/E → score 1–10 + verdict per stock</td><td><code>fundamental_research_team</code> (Financial, Valuation and Quality analysts)</td></tr>
+    <tr><td class="k">Landscape</td><td><span class="tag t-flash">3.8 Flash</span></td><td>Google Search + schema</td><td>symbols → competitors, moat, positioning</td><td><code>global_equities_desk</code></td></tr>
+    <tr><td class="k">News</td><td><span class="tag t-flash">3.8 Flash</span></td><td>Google Search + schema</td><td>symbols → dated catalysts and risks, with sources</td><td><code>sentiment_intelligence_team</code></td></tr>
+    <tr><td class="k">Social</td><td><span class="tag t-flash">3.8 Flash</span></td><td>Google Search + schema</td><td>symbols → Reddit/X sentiment score from -1 to 1</td><td><code>social_alpha_team</code> (Twitter and Reddit analysts)</td></tr>
+    <tr><td class="k">Orchestrator</td><td><span class="tag t-argon">4 Argon</span></td><td>schema</td><td>all findings + risk-parity baseline + intake (+ round-1 feedback) → <code>Allocation</code></td><td><code>global_allocation_committee</code> (allocator)</td></tr>
+    <tr><td class="k">Verifier</td><td><span class="tag t-argon">4 Argon</span> + <span class="tag t-flash">sandbox</span></td><td><b>code execution</b> + schema</td><td>allocation + price CSV → backtest + hard checks → approve or reject</td><td><code>risk_committee</code> (Head of Risk)</td></tr>
+  </tbody>
+</table>
+
+<!-- ============ DATA ============ -->
+<h2>3 · Where the data comes from <small>live-tested today</small></h2>
+<p class="sub">No number in the report comes from model memory. Prices and financial statements come from <b>Vibe-Trading's own loaders</b>, copied into our backend unmodified. The LLMs <b>interpret</b> the data and look up news, but they don't recall figures.</p>
+
+<table>
+  <thead><tr><th>Data</th><th>Source</th><th>Loader (vendored)</th><th>Live test</th><th>Used by</th></tr></thead>
+  <tbody>
+    <tr><td class="k">Stock prices</td><td>Yahoo Finance</td><td><span class="tag t-vt">yfinance_loader</span> <code>NVDA.US</code></td><td class="num">1,256 daily bars · 0.4s <span class="ok">✓</span></td><td>Backtest, risk parity</td></tr>
+    <tr><td class="k">Gold</td><td>Yahoo Finance (GLD ETF)</td><td><span class="tag t-vt">yfinance_loader</span> <code>GLD.US</code></td><td class="num">1,256 bars · $355.78 <span class="ok">✓</span></td><td>Backtest</td></tr>
+    <tr><td class="k">Crypto prices</td><td>OKX exchange (fallback: Yahoo)</td><td><span class="tag t-vt">okx</span> <code>BTC-USDT</code></td><td class="num">1,827 bars · 6.7s <span class="ok">✓</span></td><td>Backtest, risk parity</td></tr>
+    <tr><td class="k">Benchmarks</td><td>Yahoo: SPY, AGG</td><td><span class="tag t-vt">yfinance_loader</span></td><td class="num">SPY $755.72 <span class="ok">✓</span></td><td>S&amp;P 500, 60/40, equal-weight</td></tr>
+    <tr><td class="k">Financial statements</td><td><b>SEC EDGAR</b> 10-K/10-Q, point-in-time</td><td><span class="tag t-vt">fundamentals_loader</span></td><td class="num">NVDA TTM revenue $303.0B · 0.7s <span class="ok">✓</span></td><td>Financials agent</td></tr>
+    <tr><td class="k">Valuation (P/E, market cap)</td><td>Yahoo <code>Ticker.info</code></td><td>yfinance</td><td class="num">NVDA P/E 25.9 <span class="ok">✓</span></td><td>Financials agent</td></tr>
+    <tr><td class="k">News, social, competitors</td><td><b>Google Search grounding</b></td><td>Gemini tool</td><td class="num">NVDA Q2 FY27 $96.2B · 9.5s <span class="ok">✓</span></td><td>Discovery, Landscape, News, Social</td></tr>
+  </tbody>
+</table>
+
+<div class="flow-data">
+  <div class="card"><h3>1 · Fetch</h3><p>The vendored loaders pull 5 years of prices and SEC figures, cached to disk. The likely tickers are pre-cached before the demo.</p></div>
+  <div class="arrow">→</div>
+  <div class="card"><h3>2 · Two independent computations</h3><p><b>Sandbox:</b> a weekly CSV goes into Gemini code execution.<br><b>Ours:</b> pandas, the vendored <code>risk_xray</code> and <code>bootstrap_sharpe_ci</code>.</p></div>
+  <div class="arrow">→</div>
+  <div class="card"><h3>3 · Cross-check</h3><p>If the sandbox's and our total return and max drawdown differ by more than 0.5 percentage points, the check fails visibly. The UI shows a <b>✓ Verified</b> badge only when they match.</p></div>
+</div>
+
+<!-- ============ VERIFICATION ============ -->
+<h2>4 · What "verified" means</h2>
+<p class="sub">These are plain Python rules, not an LLM's opinion. The Argon Verifier only <i>explains</i> failures and suggests fixes.</p>
+<div class="grid">
+  <div class="card"><h3>Drawdown within your risk level</h3><p>Conservative −20% · Moderate −35% · Aggressive −55%. Measured by the vendored risk x-ray over 5 years.</p></div>
+  <div class="card"><h3>Sharpe CI lower bound &gt; 0</h3><p>1,000 bootstrap resamples. Live example: Sharpe 1.01, but <b>95% CI 0.07–1.89</b>. That honesty about uncertainty is the point.</p></div>
+  <div class="card"><h3>Sandbox = our numbers</h3><p>Gemini's sandbox and our pandas must agree within 0.5 percentage points. Live test: 22.12% vs 22.12%.</p></div>
+  <div class="card"><h3>Sane weights</h3><p>Weights sum to exactly 100%, no single holding above 25%, and concentration is checked with risk-x-ray HHI.</p></div>
+  <div class="card"><h3>No look-ahead cheating</h3><p>We only backtest <i>today's</i> weights over history and say so. We never ask the model what it "would have picked in 2021".</p></div>
+  <div class="card"><h3>Quant baseline shown</h3><p>Risk-parity weights sit beside the LLM's allocation, so judges can see where the agents deviate and why.</p></div>
+</div>
+
+<!-- ============ INHERITED ============ -->
+<h2>5 · Inherited from Vibe-Trading vs built new</h2>
+<div class="grid">
+  <div class="card" style="border-top:4px solid var(--vt)"><h3>Vendored (about 2k lines, MIT)</h3>
+    <ul>
+      <li><code>backtest/risk_xray.py</code>: drawdown, volatility, VaR, HHI, correlation</li>
+      <li><code>backtest/validation.py</code>: bootstrap Sharpe CI</li>
+      <li><code>backtest/optimizers/</code>: risk parity, inverse volatility, mean-variance</li>
+      <li><code>backtest/loaders/</code>: yfinance, OKX, SEC EDGAR</li>
+      <li>Prompt text from 6 swarm presets and their skill checklists</li>
+    </ul></div>
+  <div class="card" style="border-top:4px solid var(--py)"><h3>Built new (ours)</h3>
+    <ul>
+      <li>FastAPI server, the SSE stream, our API contract</li>
+      <li>8 single-call Gemini agents (Interactions API)</li>
+      <li>Sandbox backtest + cross-check engine</li>
+      <li>Verifier rules + 2-round rebalance loop</li>
+      <li>Onboarding chat, saved-run replay for the demo</li>
+    </ul></div>
+  <div class="card" style="border-top:4px solid var(--bad)"><h3>Not inherited (deliberately)</h3>
+    <ul>
+      <li>Swarm runtime (langchain/langgraph, 30-minute agents): too slow for a live demo</li>
+      <li>Their API server and React UI: the team builds in Next.js against our contract</li>
+      <li>35+ other loaders. Stooq is blocked by an anti-bot page</li>
+    </ul></div>
+</div>
+
+<!-- ============ API ============ -->
+<h2>6 · What the frontend calls</h2>
+<p class="sub">The full contract is in <code>docs/API_CONTRACT.md</code>. The frontend calls <code>NEXT_PUBLIC_BACKEND_URL</code> directly; CORS is open.</p>
+<table>
+  <thead><tr><th>Endpoint</th><th>When</th><th>Returns</th></tr></thead>
+  <tbody>
+    <tr><td class="k"><code>POST /api/intake/messages</code></td><td>Every chat turn (stateless; send the whole history)</td><td><code>IntakeTurn</code>: reply, draft intake, isComplete</td></tr>
+    <tr><td class="k"><code>POST /api/runs</code></td><td>User taps Run on the confirm card</td><td><code>202 Run</code> with runId</td></tr>
+    <tr><td class="k"><code>GET /api/runs/{id}/events</code></td><td>Immediately after; drives the agent lanes</td><td>SSE: <code>agent.*</code>, <code>allocation.proposed</code>, <code>backtest.completed</code>, <code>verification.completed</code>, <code>run.completed</code></td></tr>
+    <tr><td class="k"><code>GET /api/runs/{id}</code></td><td>Refresh, or when the stream drops</td><td>A <code>Run</code> with the final <code>Report</code></td></tr>
+  </tbody>
+</table>
+
+<!-- ============ HOSTING + BUILD ============ -->
+<h2>7 · Hosting and who builds what</h2>
+<div class="grid">
+  <div class="card"><h3>Hosting</h3>
+    <ul>
+      <li><b>Cloud Run</b>, project <code>imp-hallow26lon-5515</code></li>
+      <li>1 instance (runs held in memory)</li>
+      <li>Environment: <code>GEMINI_API_KEY</code>, <code>SEC_USER_AGENT</code></li>
+      <li>Frontend: Next.js (teammates)</li>
+    </ul></div>
+  <div class="card"><h3>Build: Orca orchestration</h3>
+    <ul>
+      <li><b>Opus 5.5</b>: lead coordinator, vendoring, deploy, reviews, merges</li>
+      <li><b>Sonnet 5.5</b>: server, SSE, pipeline, agents, Verifier loop</li>
+      <li><b>Gemini 3.8 Flash</b> (Antigravity): Gemini helper, data layer, engine, intake, replay</li>
+      <li>Every worker follows the <i>incremental-implementation</i> and <i>test-driven-development</i> skills</li>
+    </ul></div>
+  <div class="card"><h3>Gemini budget per run</h3>
+    <div class="big num">~10–13 calls</div>
+    <p>1 Discovery + 4 research + 1 Orchestrator + 1 sandbox + 1 Verifier, about 8 per round, and round 2 adds about 3. Plus 2–4 chat turns. Well under the hackathon's abuse threshold.</p></div>
+</div>
+
+<div class="callout"><b>Demo safety:</b> a saved real run can be replayed through the same stream if the API returns 503 on stage, the chat falls back to a plain form, and the price data is pre-cached. The demo never depends on one live call succeeding.</div>
+
+<footer>Generated 2026-10-31 · Sources: <code>docs/PLAN.md</code>, <code>docs/API_CONTRACT.md</code> · All "live test" figures were measured today against the hackathon key and the vendored Vibe-Trading code.</footer>
+</main>
+</body>
+</html>

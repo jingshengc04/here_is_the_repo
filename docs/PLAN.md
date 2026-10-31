@@ -62,6 +62,9 @@ max drawdown -48.6%, Sharpe ratio 1.01 with a 95% bootstrap confidence interval 
 | **Bootstrap Sharpe CI** `bootstrap_sharpe_ci(equity, bars_per_year=52)` | `agent/backtest/validation.py` | **Vendor.** Fills `Backtest.sharpeCi`, and the Verifier rejects the portfolio if the lower bound is ≤ 0. Strip `sharpe_samples` before emitting |
 | **Metrics helpers** (`period_returns`, `effective_bars_per_year`) | `agent/backtest/metrics.py` (+ `models.py`) | **Vendor.** `risk_xray` and `validation` depend on them |
 | **Risk-parity / inverse-vol optimizers** `RiskParityOptimizer()._calc_weights({"cov": cov})` | `agent/backtest/optimizers/` | **Vendor.** Gives the Orchestrator a quant baseline ("risk parity would say GLD 47%") to anchor or justify its weights |
+| **Price loader: stocks, gold, benchmarks** `yfinance_loader.DataLoader().fetch(["NVDA.US","GLD.US","SPY.US","AGG.US"], start, end)` | `agent/backtest/loaders/yfinance_loader.py` | **Vendor.** Live: 1,256 daily bars per symbol in 0.4s. Gold = `GLD` |
+| **Price loader: crypto** `okx.DataLoader().fetch(["BTC-USDT","ETH-USDT","SOL-USDT"], ...)` | `agent/backtest/loaders/okx.py` | **Vendor.** Exchange-native data, so a Yahoo block on Cloud Run doesn't hit crypto. Live: 1,827 daily bars in 6.7s. Fallback: the yfinance loader with `BTC-USD` |
+| **Fundamentals: SEC EDGAR, point-in-time** `load_fundamental_panel(["NVDA"], ["revenue","net_income","total_debt","cash","cfo","capex","gross_profit","operating_income"], start, end, freq="ttm")` | `agent/backtest/loaders/fundamentals_loader.py` + `sec_edgar_client.py` | **Vendor.** Official 10-K/10-Q filings, not model memory. Live: NVDA TTM revenue $303.0B, MSFT $346.4B in 0.7s. Needs `SEC_USER_AGENT` in `.env`. yfinance `Ticker.info` adds the price-based fields (P/E, market cap) that SEC filings don't have |
 | **Agent prompts** | `agent/src/swarm/presets/*.yaml` | **Adapt the text into `agents.py`:** `social_alpha_team` (Twitter/Reddit analysts → SOCIAL), `fundamental_research_team` (Financial, Valuation and Quality analysts → FINANCIALS), `sentiment_intelligence_team` (→ NEWS), `global_allocation_committee` allocator (→ ORCHESTRATOR), `risk_committee` Head of Risk (→ VERIFIER) |
 | **Domain checklists** | `agent/src/skills/{financial-statement,valuation-model,sentiment-analysis,social-media-intelligence,asset-allocation,risk-analysis}/` | **Adapt:** pull the key bullet points into each agent's prompt (one paragraph at most, to keep prompts short) |
 
@@ -69,7 +72,7 @@ max drawdown -48.6%, Sharpe ratio 1.01 with a 95% bootstrap confidence interval 
 - **Swarm runtime** (langchain/langgraph, 50 iterations and 1,800s timeouts per agent, file-based task store): far too slow for a 3-minute demo. We use one Gemini call per agent instead.
 - **`api_server.py`:** a different API shape; we follow our contract.
 - **The vibe-trading React frontend:** the team is building in Next.js.
-- **The 40+ loaders and registry:** yfinance alone covers stocks, crypto and gold.
+- **The other 35+ loaders and the real registry**, which needs their `src.config`. Stooq is blocked by an anti-bot page.
 - **The grounding/evidence ledger:** our `Finding.sources` covers it.
 
 `ponytail:` we vendor about 1.6k lines instead of `pip install vibe-trading-ai`, because that package pulls in langchain, tushare, akshare, ccxt, duckdb and more (a slow Cloud Run build). Re-sync the copy if upstream fixes a metric bug.
@@ -100,7 +103,9 @@ Dockerfile
 
 **Task 0: Vendor the Vibe-Trading modules** · XS · *coordinator (me)*
 - [ ] Copy them into `backend/backtest/` unchanged and add `NOTICE`.
-- [ ] Smoke check: `compute_risk_xray`, `bootstrap_sharpe_ci` and `RiskParityOptimizer` all run on yfinance data.
+- [ ] Also copy `backtest/loaders/{__init__,base,_http,_symbol_utils,yfinance_loader,okx,sec_edgar_client,sec_frames,fundamentals_loader,_fundamental_schema}.py` and `sec_filer_lineage.json`.
+- [ ] Two `ponytail:` stubs, the **only** non-upstream files: `backtest/loaders/registry.py` (an identity `register` decorator) and `src/config/accessor.py` (turns their opt-in cache off and reads `SEC_USER_AGENT` from the environment).
+- [ ] Smoke check: `compute_risk_xray`, `bootstrap_sharpe_ci` and `RiskParityOptimizer` run on loader data; yfinance, OKX and SEC all return rows.
 
 
 **Task 1: Contract-compliant server with a fake pipeline** · M
@@ -128,8 +133,10 @@ Builds all 4 endpoints. A fake pipeline replays `fixtures/report.example.json` a
 ### Phase 2 — Research agents (each one replaces part of the fake pipeline)
 
 **Task 4: Data layer** · S
+A thin wrapper over the **vendored loaders**. It maps contract symbols to loader symbols: `NVDA`→`NVDA.US`, `GLD`→`GLD.US`, `BTC-USD`→OKX `BTC-USDT` (falling back to yfinance `BTC-USD`). `fundamentals(symbol)` = SEC TTM fields plus yfinance P/E and market cap.
 `prices(symbols, years=5)` → **weekly** closes as a DataFrame (one frequency everywhere: the equity curve, the sandbox CSV, and `risk_xray`/bootstrap with 52 periods per year). `fundamentals(symbol)` → a dict of revenue, margins, debt, cash, P/E and so on. Results are cached to disk.
-- [ ] Works for `NVDA`, `BTC-USD`, `GLD`, `SPY`, `AGG`. Cached files survive a restart.
+- [ ] Works for `NVDA`, `BTC-USD`, `GLD`, `SPY`, `AGG`. If OKX is down, crypto still loads from the yfinance fallback. Cached parquet files survive a restart.
+- [ ] Before the demo, pre-fetch and commit the cache for the likely symbols (about 30 tickers), so the demo works even if Yahoo blocks Cloud Run.
 - Files: `data.py`
 
 **Task 5: Discovery agent** · S
@@ -195,7 +202,7 @@ Everything gets pushed to GitHub and the demo video is recorded before the accou
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Yahoo blocks or rate-limits Cloud Run IPs | High | Disk cache plus pre-fetched data for the likely tickers committed to the repo |
+| Yahoo blocks or rate-limits Cloud Run IPs | Med | Crypto comes from OKX; SEC for fundamentals; pre-fetched price cache committed for about 30 likely tickers |
 | `gemini-4-argon` 503 under hackathon load | High | Retry, then fall back to `gemini-3.8-flash`; Task 11 replay |
 | Sandbox 30s limit on the backtest | Med | Weekly (not daily) prices for 12 or fewer symbols over 5 years, about 260 rows |
 | Combining structured output with tools is "Preview" | Low | ✅ Live-tested and works. Fallback if it breaks: make two calls, one with tools and one with the schema |
