@@ -10,7 +10,7 @@
 User fills an intake (amount, horizon, risk) → backend runs a team of Gemini agents →
 streams their progress live → returns a **verified two-level portfolio**:
 
-- **Inner ring:** asset classes — `STOCKS` / `CRYPTO` / `GOLD` with %.
+- **Inner ring:** asset classes: `STOCKS` / `CRYPTO` / `GOLD` / `BONDS` with %.
 - **Outer ring:** holdings inside each class (e.g. `NVDA 14%`, `BTC-USD 15%`, `GLD 25%`).
 - Every holding has a rationale + evidence links from the agents.
 - A backtest compares the portfolio to benchmarks; a Verifier may **reject** round 1 and
@@ -189,7 +189,7 @@ export interface Finding {
 }
 
 // ---------- Allocation (the sunburst) ----------
-export type AssetClass = "STOCKS" | "CRYPTO" | "GOLD";
+export type AssetClass = "STOCKS" | "CRYPTO" | "GOLD" | "BONDS";  // BONDS is NEW: bond ETFs (BND, SHY…) for Conservative/Moderate. Give it a 4th pie colour
 
 export interface Holding {
   symbol: string;           // "NVDA", "BTC-USD", "GLD"

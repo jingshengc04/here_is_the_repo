@@ -6,7 +6,7 @@ from pydantic import BaseModel, model_validator, Field
 RiskTolerance = Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"]
 RunStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]
 AgentId = Literal["DISCOVERY", "FINANCIALS", "LANDSCAPE", "NEWS", "SOCIAL", "ORCHESTRATOR", "VERIFIER"]
-AssetClass = Literal["STOCKS", "CRYPTO", "GOLD"]
+AssetClass = Literal["STOCKS", "CRYPTO", "GOLD", "BONDS"]
 SeriesKey = Literal["PORTFOLIO", "SPY", "SIXTY_FORTY", "EQUAL_WEIGHT"]
 ErrorCode = Literal["VALIDATION_ERROR", "RUN_NOT_FOUND", "RATE_LIMITED", "INTERNAL"]
 
