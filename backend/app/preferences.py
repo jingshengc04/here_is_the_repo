@@ -117,12 +117,14 @@ _RESOLVE_PROMPT = """You translate an investor's personal preferences into data 
 Investor: risk {risk}, theme: {theme}.
 Preferences (JSON): {prefs}
 
-Map EVERY phrase onto Yahoo Finance's taxonomy, whatever it is (never refuse or special-case a phrase):
+Map EVERY phrase onto Yahoo Finance's taxonomy, whatever it is (never refuse or special-case a phrase).
+RULE 1 (most important): match what an ordinary investor MEANS, not Yahoo's narrowest label. Yahoo often splits one everyday idea across several industries; include ALL of them (e.g. investors call Amgen and Gilead 'biotech' but Yahoo files them under 'Drug Manufacturers - General', so 'biotech' -> Biotechnology + Drug Manufacturers - General + Drug Manufacturers - Specialty & Generic).
 - sectors: ONLY from this list: {sectors}. Map a vaguer word to the closest sector(s), or leave it out and say so in interpretations.
 - industries: Yahoo industry names, e.g. "Biotechnology", "Drug Manufacturers - General", "Semiconductors", "Banks - Regional", "Oil & Gas E&P", "Tobacco", "Aerospace & Defense".
 - countries: Yahoo country names (e.g. "China", "Germany"). A region ("European") means a list of its countries.
 - assetClasses: STOCKS, CRYPTO, GOLD, BONDS. symbols: exact tickers (stocks like NVDA, crypto like DOGE-USD).
 - keywords: last resort only, substring of a company name.
+Map each phrase to what an ordinary investor MEANS, including closely adjacent Yahoo industries where Yahoo's labels split a common idea (e.g. "biotech"/"pharma" -> ["Biotechnology", "Drug Manufacturers - General", "Drug Manufacturers - Specialty & Generic"]; "banks" -> ["Banks - Diversified", "Banks - Regional"]; "chips" -> ["Semiconductors", "Semiconductor Equipment & Materials"]). Do NOT widen to a whole sector unless the investor named the sector. Say what you included in the interpretation line.
 In `only`, never add assetClasses STOCKS next to sectors/industries/countries (it is implied; adding it would let every stock through).
 Fields: mustInclude = tickers the investor insists on. only = restrict the universe to this (e.g. "only biotech" -> industries ["Biotechnology"]). exclude = never include (e.g. "no tech" -> sectors ["Technology"]; "ethical" -> industries like Tobacco, Aerospace & Defense, Oil & Gas E&P, Oil & Gas Integrated, Thermal Coal; "no gold" -> assetClasses ["GOLD"]). prefer = soft preference (styles or likes). classTargets = asset-class percentages, with pct 0 for a class the investor does not want at all.
 interpretations: ONE short line per investor phrase, e.g. "'bio stocks' -> only stocks in industry Biotechnology", "'no tech' -> excluding sector Technology".
