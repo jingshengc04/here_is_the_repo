@@ -274,3 +274,4 @@ class Candidate(BaseModel):
     assetClass: AssetClass
     financialScore: float | None = None   # 1–10, stocks only (FINANCIALS)
     sentimentScore: float | None = None   # -1.0 … 1.0 (SOCIAL + NEWS blend)
+    isUserRequested: bool = False         # came from preferences.mustInclude

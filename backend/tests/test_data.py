@@ -314,3 +314,62 @@ def test_live_fetches_nvda_gld_btc():
     assert fundamentals("BTC-USD") == {}
 
 
+
+
+# ---- Wave 4A: yahoo fallback / sanity check / OKX-only memecoins ----
+def test_merge_fills_missing_and_zero_sec_fields_from_yahoo():
+    from app.data import merge_fundamentals
+    sec = {"revenue": None, "net_income": 0.0, "cfo": 10.0, "cash": 5.0}
+    merged, src = merge_fundamentals(sec, {"revenue": 90e9, "net_income": 30e9})
+    assert merged["revenue"] == 90e9 and src["revenue"] == "yahoo"
+    assert merged["net_income"] == 30e9 and src["net_income"] == "yahoo"
+    assert src["cfo"] == "sec" and merged["cfo"] == 10.0  # no yahoo value -> keep SEC
+
+
+def test_merge_prefers_yahoo_when_cfo_sign_or_size_disagrees(caplog):
+    from app.data import merge_fundamentals
+    m, s = merge_fundamentals({"cfo": -2e9, "total_debt": 50e9, "cash": 10e9},
+                              {"cfo": 6e9, "total_debt": 52e9, "cash": 20e9})
+    assert (m["cfo"], s["cfo"]) == (6e9, "yahoo")              # sign differs
+    assert (m["total_debt"], s["total_debt"]) == (50e9, "sec")  # within 25%
+    assert (m["cash"], s["cash"]) == (20e9, "yahoo")            # 50% off
+    assert "disagrees" in caplog.text
+
+
+def test_yahoo_fields_reads_latest_annual_and_abs_capex():
+    from app.data import _yahoo_fields
+    cols = pd.to_datetime(["2025-12-31", "2024-12-31"])
+    t = MagicMock()
+    t.financials = pd.DataFrame({cols[0]: [100.0], cols[1]: [80.0]}, index=["Total Revenue"])
+    t.cashflow = pd.DataFrame({cols[0]: [-7.0, 20.0], cols[1]: [-5.0, 15.0]}, index=["Capital Expenditure", "Operating Cash Flow"])
+    t.balance_sheet = MagicMock()  # not a DataFrame -> ignored
+    out = _yahoo_fields(t)
+    assert out == {"revenue": 100.0, "capex": 7.0, "cfo": 20.0}
+
+
+def test_fundamentals_falls_back_to_yahoo_for_foreign_filer(tmp_path, monkeypatch):
+    cache_dir = tmp_path / "f"
+    cache_dir.mkdir()
+    monkeypatch.setattr("app.data.FUNDAMENTALS_CACHE_DIR", cache_dir)
+    dates = pd.date_range("2024-01-01", periods=3, freq="B")
+    empty = {f: pd.DataFrame({"TSM": [None] * 3}, index=dates) for f in
+             ["revenue", "gross_profit", "operating_income", "net_income", "total_debt", "cash", "cfo", "capex", "shares_diluted"]}
+    t = MagicMock()
+    t.info = {"trailingPE": 20.0}
+    t.financials = pd.DataFrame({pd.Timestamp("2025-12-31"): [90e9]}, index=["Total Revenue"])
+    with patch("backtest.loaders.fundamentals_loader.load_fundamental_panel", return_value=empty), \
+         patch("yfinance.Ticker", return_value=t):
+        res = fundamentals("TSM")
+    assert res["revenue"] == 90e9 and res["source"]["revenue"] == "yahoo"
+
+
+def test_resolve_and_prices_for_okx_only_memecoin(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.data.PRICES_CACHE_DIR", tmp_path / "prices")
+    (tmp_path / "prices").mkdir()
+    df = _make_daily_df(pd.date_range("2023-01-01", periods=450, freq="D"), np.linspace(1, 2, 450))
+    okx = MagicMock(return_value={"PEPE-USDT": df})
+    yf = MagicMock(return_value={})  # Yahoo does not know it
+    with patch("backtest.loaders.okx.DataLoader.fetch", okx), patch("backtest.loaders.yfinance_loader.DataLoader.fetch", yf):
+        assert resolve("PEPE-USD") is True
+        p, missing = prices(["PEPE-USD"], years=1)
+    assert okx.call_args[0][0] == ["PEPE-USDT"] and missing == [] and "PEPE-USD" in p.columns
