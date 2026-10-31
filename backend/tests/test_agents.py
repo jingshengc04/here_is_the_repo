@@ -83,7 +83,7 @@ def test_cap_per_symbol_keeps_one_negative_and_two_max():
 
 def test_agent_enforces_cap_trims_claims_and_ranks_sources(monkeypatch):
     R = agents.RawFinding
-    long_claim = " ".join(["word"] * 40)
+    long_claim = "risks " + " ".join(["word"] * 40)
     raws = [R(symbol="NVDA", claim=long_claim, sentiment="NEGATIVE")] + \
            [R(symbol="NVDA", claim=f"c{i}", sentiment="POSITIVE") for i in range(4)]
     cites = [{"title": "Unrelated", "url": "http://u/1"}, {"title": "Nvidia risks", "url": "http://u/2"}]

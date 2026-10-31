@@ -162,13 +162,13 @@ async def financials(stocks: list[Candidate], ids: Iterator[int], on_step=None):
                      await asyncio.gather(*(asyncio.to_thread(data.fundamentals, c.symbol) for c in stocks))))
     prompt = (
         "You are the Financials analyst. Below is fundamentals JSON per stock (TTM from SEC filings plus yfinance P/E; "
-        "values in USD). Use code execution to compute margins (gross/operating/net), leverage (debt vs cash), "
+        "values in USD). Use code execution ONCE (a single script covering all stocks) to compute margins (gross/operating/net), leverage (debt vs cash), "
         "free cash flow (cfo - capex) and valuation (P/E, market cap), then score each stock 1-10 across "
         "financial health, valuation and earnings quality. Verdict = 1 sentence (at most 25 words); keyFigures = one line "
         "'Revenue: $X B, Net income: $Y B, P/E: Z' using ONLY numbers from the data; risk = one bear-case sentence (at most 25 words). "
         "Date figures with asOf. " + DISCIPLINE + "\n\n" + llm_json(funda)
     )
-    res = await llm.ask(model=FLASH, input=prompt, schema=FinancialsOut, tools=["code_execution"], agent="FINANCIALS", on_step=on_step)
+    res = await llm.ask(model=FLASH, input=prompt, schema=FinancialsOut, tools=["code_execution"], agent="FINANCIALS", on_step=on_step, generation_config=LOW)
     scores, findings = {}, []
     for s in res.data.stocks:
         sym = s.symbol.strip().upper()
