@@ -239,3 +239,13 @@ RunEvent = Annotated[
     ],
     Field(discriminator="type"),
 ]
+
+
+# ---------- Internal (not in the API contract): research → decision hand-off ----------
+class Candidate(BaseModel):
+    """One researched symbol, produced by agents.py and consumed by decide.py."""
+    symbol: str
+    name: str
+    assetClass: AssetClass
+    financialScore: float | None = None   # 1–10, stocks only (FINANCIALS)
+    sentimentScore: float | None = None   # -1.0 … 1.0 (SOCIAL + NEWS blend)
