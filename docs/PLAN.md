@@ -65,6 +65,10 @@ max drawdown -48.6%, Sharpe ratio 1.01 with a 95% bootstrap confidence interval 
 | **Price loader: stocks, gold, benchmarks** `yfinance_loader.DataLoader().fetch(["NVDA.US","GLD.US","SPY.US","AGG.US"], start, end)` | `agent/backtest/loaders/yfinance_loader.py` | **Vendor.** Live: 1,256 daily bars per symbol in 0.4s. Gold = `GLD` |
 | **Price loader: crypto** `okx.DataLoader().fetch(["BTC-USDT","ETH-USDT","SOL-USDT"], ...)` | `agent/backtest/loaders/okx.py` | **Vendor.** Exchange-native data, so a Yahoo block on Cloud Run doesn't hit crypto. Live: 1,827 daily bars in 6.7s. Fallback: the yfinance loader with `BTC-USD` |
 | **Fundamentals: SEC EDGAR, point-in-time** `load_fundamental_panel(["NVDA"], ["revenue","net_income","total_debt","cash","cfo","capex","gross_profit","operating_income"], start, end, freq="ttm")` | `agent/backtest/loaders/fundamentals_loader.py` + `sec_edgar_client.py` | **Vendor.** Official 10-K/10-Q filings, not model memory. Live: NVDA TTM revenue $303.0B, MSFT $346.4B in 0.7s. Needs `SEC_USER_AGENT` in `.env`. yfinance `Ticker.info` adds the price-based fields (P/E, market cap) that SEC filings don't have |
+| **Number cross-checks** `cross_validate(field, {"sec":…, "yfinance":…, "llm":…})`, `verify_valuation(price, eps)` | `agent/src/tools/financial_rigor_tool.py` (pure decimal functions) | **Vendor.** Financials: every revenue, margin or P/E the agent states is cross-checked against SEC + yfinance within 2%, and P/E is recomputed from SEC EPS. Live: it caught an LLM claim of $310B vs SEC's $303.0B, and the recomputed P/E of 25.89 matched Yahoo's 25.87 |
+| **Report number audit** `extract_data_points(text)` → `render_verdict(results)` | `agent/src/tools/report_audit_tool.py` | **Vendor.** It pulls every number out of agent text, and the Verifier checks each against fetched data within 1%. Any failure → `Finding.numbersVerified=false` and a failed check |
+| **Research-bias checklist**: leader, English, narrative, confirmation and recency bias | `agent/src/skills/research-discipline/SKILL.md` | **Adapt into the Discovery and research prompts.** Search small and mid caps and suppliers too, **give at least one bear-case finding per holding** (Munger inversion), and date every figure. The Verifier enforces the bear-case rule |
+| **Execution guard** (refuse "buy NVDA now") | `agent/src/goal/policy.py` | **Adapt the idea:** the Intake agent declines to place trades and says this is research, not advice |
 | **Agent prompts** | `agent/src/swarm/presets/*.yaml` | **Adapt the text into `agents.py`:** `social_alpha_team` (Twitter/Reddit analysts → SOCIAL), `fundamental_research_team` (Financial, Valuation and Quality analysts → FINANCIALS), `sentiment_intelligence_team` (→ NEWS), `global_allocation_committee` allocator (→ ORCHESTRATOR), `risk_committee` Head of Risk (→ VERIFIER) |
 | **Domain checklists** | `agent/src/skills/{financial-statement,valuation-model,sentiment-analysis,social-media-intelligence,asset-allocation,risk-analysis}/` | **Adapt:** pull the key bullet points into each agent's prompt (one paragraph at most, to keep prompts short) |
 
@@ -73,7 +77,8 @@ max drawdown -48.6%, Sharpe ratio 1.01 with a 95% bootstrap confidence interval 
 - **`api_server.py`:** a different API shape; we follow our contract.
 - **The vibe-trading React frontend:** the team is building in Next.js.
 - **The other 35+ loaders and the real registry**, which needs their `src.config`. Stooq is blocked by an anti-bot page.
-- **The grounding/evidence ledger:** our `Finding.sources` covers it.
+- **The grounding/evidence ledger:** it's tied to their agent loop's tool-call batches. We take its idea (no unverified numbers) through `report_audit` + `cross_validate` instead.
+- **Hypothesis registry, scheduled research, strategy discovery and the long-term memory hierarchy:** features for a long-running research desk, not a one-shot 3-minute run. Our lightweight "learning" is Task 14.
 
 `ponytail:` we vendor about 1.6k lines instead of `pip install vibe-trading-ai`, because that package pulls in langchain, tushare, akshare, ccxt, duckdb and more (a slow Cloud Run build). Re-sync the copy if upstream fixes a metric bug.
 
@@ -104,7 +109,8 @@ Dockerfile
 **Task 0: Vendor the Vibe-Trading modules** · XS · *coordinator (me)*
 - [ ] Copy them into `backend/backtest/` unchanged and add `NOTICE`.
 - [ ] Also copy `backtest/loaders/{__init__,base,_http,_symbol_utils,yfinance_loader,okx,sec_edgar_client,sec_frames,fundamentals_loader,_fundamental_schema}.py` and `sec_filer_lineage.json`.
-- [ ] Two `ponytail:` stubs, the **only** non-upstream files: `backtest/loaders/registry.py` (an identity `register` decorator) and `src/config/accessor.py` (turns their opt-in cache off and reads `SEC_USER_AGENT` from the environment).
+- [ ] Also copy `src/tools/{financial_rigor_tool,report_audit_tool}.py`.
+- [ ] Three `ponytail:` stubs, the **only** non-upstream files: `backtest/loaders/registry.py` (an identity `register` decorator), `src/config/accessor.py` (turns their opt-in cache off and reads `SEC_USER_AGENT`), and `src/agent/tools.py` (an empty `BaseTool`).
 - [ ] Smoke check: `compute_risk_xray`, `bootstrap_sharpe_ci` and `RiskParityOptimizer` run on loader data; yfinance, OKX and SEC all return rows.
 
 
@@ -145,7 +151,8 @@ Search grounding → 4–6 stocks and 2–3 coins, each with a finding and sourc
 - Files: `agents.py`, `pipeline.py`
 
 **Task 6: Financials agent** · S
-The financial statements for all stocks go to code execution in one call, which returns a 1–10 score and a verdict per stock. The prompt is adapted from `fundamental_research_team.yaml`: the Financial, Valuation and Quality analyst lenses folded into one call.
+The financial statements for all stocks go to code execution in one call, which returns a 1–10 score and a verdict per stock. The prompt is adapted from `fundamental_research_team.yaml`: the Financial, Valuation and Quality analyst lenses folded into one call. **Number gate:** every figure in its verdicts runs through `extract_data_points`, then `cross_validate` against SEC + yfinance. P/E is recomputed with `verify_valuation`. Claims that fail are dropped or marked `numbersVerified=false`.
+- [ ] Test: a verdict claiming "$310B revenue" for NVDA (SEC: $303.0B) is flagged.
 - [ ] The `agent.progress` events show the sandbox code ran.
 - Files: `agents.py`
 
@@ -174,7 +181,7 @@ All findings, the intake **and the vendored risk-parity weights for the candidat
 - Files: `engine.py`, `tests/test_engine.py` (do **not** edit `backtest/`)
 
 **Task 10: Verifier, rebalance loop and final report** · M
-Deterministic checks (drawdown limit for the risk level, weights sum to 100, max single holding 25%, `crossCheck.isMatch`, **Sharpe CI lower bound > 0**, and risk-x-ray concentration) plus Argon writing `changesRequested`. The prompt is adapted from the Head of Risk in `risk_committee.yaml`. Then round 2 if needed, then `Report` assembly.
+Deterministic checks (drawdown limit for the risk level, weights sum to 100, max single holding 25%, `crossCheck.isMatch`, **Sharpe CI lower bound > 0**, risk-x-ray concentration, **every holding has at least one NEGATIVE finding**, and **no holding rests on a finding with `numbersVerified=false`**) plus Argon writing `changesRequested`. The prompt is adapted from the Head of Risk in `risk_committee.yaml`. Then round 2 if needed, then `Report` assembly.
 - [ ] An AGGRESSIVE-heavy crypto proposal under a MODERATE intake gets rejected in round 1 and approved in round 2.
 - [ ] `run.completed.report` validates against `models.Report`.
 - Files: `agents.py`, `pipeline.py`
@@ -184,6 +191,11 @@ Deterministic checks (drawdown limit for the risk level, weights sum to 100, max
 - [ ] A test with a scripted 3-turn conversation ("10k" → "2 years" → "moderate") ends with `isComplete` and `amountUsd == 10000`.
 - [ ] 21 messages → 422.
 - Files: `main.py` (route only), `agents.py` (`intake_turn`)
+
+**Task 14: Lessons memory (optional, P1)** · S
+A lightweight version of Vibe-Trading's persistent memory. After each run, append `{riskTolerance, rejectedReasons, finalMetrics}` to `backend/data/lessons.jsonl`. The Orchestrator prompt then gets the last 5 lessons for the same risk level, so round 1 stops repeating known mistakes.
+- [ ] Flag: `LESSONS=on|off` (**off for the live demo**, so round 1 still shows the rejection; turn it on for a "second run learns" bonus slide).
+- Files: `pipeline.py`, `agents.py`
 
 ### Checkpoint C — end to end
 - [ ] A real run from the deployed frontend finishes in under about 3 minutes with 12 or fewer Gemini calls.

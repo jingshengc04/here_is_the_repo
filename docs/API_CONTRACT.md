@@ -172,6 +172,7 @@ export interface Finding {
   claim: string;            // one sentence, human readable
   sentiment: "POSITIVE" | "NEGATIVE" | "NEUTRAL";
   sources: Source[];        // may be empty for FINANCIALS (data from statements)
+  numbersVerified?: boolean | null; // true = every number in `claim` matched SEC/yfinance data (±2%). null = no numbers. Show a ✓ or ⚠ badge
 }
 
 // ---------- Allocation (the sunburst) ----------

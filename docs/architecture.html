@@ -167,6 +167,8 @@
   <div class="card"><h3>Sandbox = our numbers</h3><p>Gemini's sandbox and our pandas must agree within 0.5 percentage points. Live test: 22.12% vs 22.12%.</p></div>
   <div class="card"><h3>Sane weights</h3><p>Weights sum to exactly 100%, no single holding above 25%, and concentration is checked with risk-x-ray HHI.</p></div>
   <div class="card"><h3>No look-ahead cheating</h3><p>We only backtest <i>today's</i> weights over history and say so. We never ask the model what it "would have picked in 2021".</p></div>
+  <div class="card"><h3>Every number audited</h3><p>Vendored <code>report_audit</code> + <code>cross_validate</code> check every figure an agent states against SEC and Yahoo data (±2%). Live: an LLM claim of "$310B" was flagged against SEC's $303.0B.</p></div>
+  <div class="card"><h3>Bear case required</h3><p>Every holding needs at least one disconfirming finding (Vibe-Trading's research-bias checklist, Munger inversion). One-sided bullish research fails the check.</p></div>
   <div class="card"><h3>Quant baseline shown</h3><p>Risk-parity weights sit beside the LLM's allocation, so judges can see where the agents deviate and why.</p></div>
 </div>
 
@@ -179,6 +181,8 @@
       <li><code>backtest/validation.py</code>: bootstrap Sharpe CI</li>
       <li><code>backtest/optimizers/</code>: risk parity, inverse volatility, mean-variance</li>
       <li><code>backtest/loaders/</code>: yfinance, OKX, SEC EDGAR</li>
+      <li><code>financial_rigor</code> + <code>report_audit</code>: number cross-checks</li>
+      <li>Research-bias checklist (leader, narrative, confirmation, recency bias)</li>
       <li>Prompt text from 6 swarm presets and their skill checklists</li>
     </ul></div>
   <div class="card" style="border-top:4px solid var(--py)"><h3>Built new (ours)</h3>
@@ -194,6 +198,7 @@
       <li>Swarm runtime (langchain/langgraph, 30-minute agents): too slow for a live demo</li>
       <li>Their API server and React UI: the team builds in Next.js against our contract</li>
       <li>35+ other loaders. Stooq is blocked by an anti-bot page</li>
+      <li>Hypothesis registry, scheduled research, memory hierarchy: built for a long-running desk. We use a light lessons log (optional)</li>
     </ul></div>
 </div>
 
