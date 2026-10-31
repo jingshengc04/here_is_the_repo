@@ -5,11 +5,15 @@ This is the FAKE: it replays app/fixtures/report.example.json as a realistic eve
 import asyncio
 import json
 import os
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .models import IntakeInput, Report
+from itertools import count
+
+from . import agents
+from .models import Candidate, IntakeInput, Report
 
 Emit = Callable[[dict], Awaitable[None]]
 FIXTURE = Path(__file__).parent / "fixtures" / "report.example.json"
@@ -41,7 +45,7 @@ async def _agent(emit: Emit, agent: str, findings: list[dict], model: str = FLAS
                 "durationMs": int(1800 + 700 * len(findings))})
 
 
-async def run_pipeline(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
+async def run_fake(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
     fx = json.loads(FIXTURE.read_text())["report"]
     fx.update(runId=run_id, intake=intake.model_dump(), generatedAt=datetime.now(timezone.utc).isoformat())
     by_agent: dict[str, list[dict]] = {}
@@ -67,3 +71,88 @@ async def run_pipeline(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
         await emit({"type": "verification.completed", "round": n, "verification": rnd["verification"]})
         await emit({"type": "agent.completed", "agent": "VERIFIER", "summary": "approved" if rnd["verification"]["isApproved"] else "rejected", "durationMs": 2600})
     return Report.model_validate(fx)
+
+
+DISCLAIMER = ("Educational demo only. Not financial advice. Backtests apply today's weights to historical "
+              "prices and do not predict future returns.")
+_SENT = {"POSITIVE": 1.0, "NEGATIVE": -1.0, "NEUTRAL": 0.0}
+
+
+def _step_cb(emit: Emit, agent: str):
+    async def cb(step: dict) -> None:
+        msg = step.get("message") or (f"Searching: {step['query']}" if step.get("query")
+                                      else "Running code analysis" if step.get("code") else None)
+        if msg:
+            await emit({"type": "agent.progress", "agent": agent, "message": msg})
+    return cb
+
+
+async def _run_agent(emit: Emit, agent: str, model: str, coro_fn):
+    """Wrap one agent: started -> (progress via callback) -> findings -> completed. Raises on failure after agent.failed."""
+    t0 = time.monotonic()
+    await emit({"type": "agent.started", "agent": agent, "model": model, "task": TASKS[agent]})
+    try:
+        result, findings = await coro_fn(_step_cb(emit, agent))
+    except Exception as e:
+        await emit({"type": "agent.failed", "agent": agent, "message": f"{type(e).__name__}: {str(e)[:200]}"})
+        raise
+    for f in findings:
+        await emit({"type": "agent.finding", "finding": f.model_dump()})
+    await emit({"type": "agent.completed", "agent": agent, "summary": f"{len(findings)} findings",
+                "durationMs": int((time.monotonic() - t0) * 1000)})
+    return result, findings
+
+
+async def research(intake: IntakeInput, emit: Emit) -> tuple[list[Candidate], list]:
+    """Research phase: DISCOVERY, then FINANCIALS/LANDSCAPE/NEWS/SOCIAL in parallel. Returns (candidates, findings)."""
+    ids = count(1)
+    cands, findings = await _run_agent(emit, "DISCOVERY", FLASH, lambda cb: agents.discovery(intake, ids, cb))
+    stocks = [c for c in cands if c.assetClass == "STOCKS"]
+    syms = [c.symbol for c in cands]
+
+    async def pack(coro):  # normalise to (result, findings)
+        r = await coro
+        return (None, r) if isinstance(r, list) else r
+
+    results = await asyncio.gather(
+        _run_agent(emit, "FINANCIALS", FLASH, lambda cb: agents.financials(stocks, ids, cb)),
+        _run_agent(emit, "LANDSCAPE", FLASH, lambda cb: pack(agents.landscape(syms, ids, cb))),
+        _run_agent(emit, "NEWS", FLASH, lambda cb: pack(agents.news(syms, ids, cb))),
+        _run_agent(emit, "SOCIAL", FLASH, lambda cb: agents.social(syms, ids, cb)),
+        return_exceptions=True)  # a failing agent already emitted agent.failed; the run continues
+    ok = [None if isinstance(r, Exception) else r for r in results]
+    scores = ok[0][0] if ok[0] else {}
+    social = ok[3][0] if ok[3] else {}
+    for r in ok:
+        if r:
+            findings = findings + r[1]
+    news_f = ok[2][1] if ok[2] else []
+    for c in cands:
+        if c.symbol in scores:
+            c.financialScore = scores[c.symbol][0]
+        parts = [v for v in (social.get(c.symbol),) if v is not None]
+        nf = [_SENT[f.sentiment] for f in news_f if f.symbol == c.symbol]
+        if nf:
+            parts.append(sum(nf) / len(nf))
+        if parts:
+            c.sentimentScore = round(sum(parts) / len(parts), 2)
+    return cands, findings
+
+
+async def run_real(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
+    from . import decide  # lazy: decide.py is built separately
+
+    await emit({"type": "run.started", "agents": ["DISCOVERY", *PARALLEL, "ORCHESTRATOR", "VERIFIER"]})
+    cands, findings = await research(intake, emit)
+    rounds = await decide.decide(intake, cands, findings, emit)
+    summary = await decide.summarize(intake, rounds, findings)
+    rounds = [r if isinstance(r, dict) else r.model_dump() for r in rounds]
+    return Report.model_validate({
+        "runId": run_id, "generatedAt": datetime.now(timezone.utc).isoformat(), "intake": intake.model_dump(),
+        "summary": summary, "finalAllocation": rounds[-1]["allocation"], "rounds": rounds,
+        "findings": [f.model_dump() for f in findings], "disclaimer": DISCLAIMER})
+
+
+async def run_pipeline(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
+    impl = run_real if os.environ.get("PIPELINE", "fake") == "real" else run_fake
+    return await impl(run_id, intake, emit)
