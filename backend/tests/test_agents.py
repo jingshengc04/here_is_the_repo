@@ -140,7 +140,7 @@ def test_defensive_not_duplicated_when_already_picked(monkeypatch):
 # ---------------- Wave 4A ----------------
 import datetime as _dt
 
-from app.models import Preferences
+from app.models import Preferences, ResolvedPreferences
 
 
 def test_gate_missing_or_zero_data_is_never_verified():
@@ -248,27 +248,6 @@ def test_must_include_already_picked_by_model_is_marked_not_duplicated(monkeypat
     assert [c.symbol for c in cands].count("NVDA") == 1 and cands[0].isUserRequested
 
 
-def test_exclude_by_symbol_and_by_word(monkeypatch):
-    monkeypatch.setattr(data, "resolve", lambda s: True)
-    info = {"XOM": {"sector": "energy", "industry": "oil & gas integrated", "longName": "exxon mobil"},
-            "TSLA": {"sector": "consumer cyclical", "industry": "auto", "longName": "tesla, inc."},
-            "NVDA": {"sector": "technology", "industry": "semiconductors", "longName": "nvidia"},
-            "GLD": {"sector": "", "industry": "", "longName": "spdr gold shares"}}
-    monkeypatch.setattr(data, "company_info", lambda s: info.get(s, {}))
-    cands, fs, prompt, notes, msgs = _discover_prefs(
-        monkeypatch, [P("NVDA"), P("XOM"), P("TSLA"), P("DOGE-USD", "CRYPTO")], exclude=["oil", "Tesla", "DOGE"])
-    syms = [c.symbol for c in cands]
-    assert syms == ["NVDA", "GLD"]  # XOM (word: oil), TSLA (word: tesla), DOGE-USD (symbol w/o -USD) all gone
-    assert all(f.symbol in syms for f in fs)
-    assert "oil" in prompt and "Tesla" in prompt  # also told to the model
-
-
-def test_esg_filters_fossil_names_and_styles_steer_prompt(monkeypatch):
-    monkeypatch.setattr(data, "resolve", lambda s: True)
-    monkeypatch.setattr(data, "company_info", lambda s: {"industry": "oil & gas e&p"} if s == "XOM" else {})
-    cands, _, prompt, *_ = _discover_prefs(monkeypatch, [P("NVDA"), P("XOM")], styles=["ESG", "MEME"])
-    assert "XOM" not in [c.symbol for c in cands]
-    assert "meme coins" in prompt and "PEPE" in prompt and "ESG" in prompt
 
 
 def test_asset_class_targets_drive_candidate_counts_and_notes(monkeypatch):
@@ -314,8 +293,9 @@ def _bonds(monkeypatch, risk, **prefs):
 
 
 def test_asset_class_marks_bond_etfs():
-    assert agents._asset_class("SHY") == "BONDS" and agents._asset_class("TLT") == "BONDS"
-    assert agents._asset_class("GLD") == "GOLD" and agents._asset_class("NVDA") == "STOCKS"
+    from app.preferences import asset_class
+    assert asset_class("SHY") == "BONDS" and asset_class("TLT") == "BONDS"
+    assert asset_class("GLD") == "GOLD" and asset_class("NVDA") == "STOCKS"
 
 
 def test_conservative_gets_two_lowest_drawdown_bonds(monkeypatch):
@@ -336,12 +316,98 @@ def test_aggressive_with_bonds_target_or_defensive_style_adds_bonds(monkeypatch)
     assert [b.symbol for b in _bonds(monkeypatch, "AGGRESSIVE", styles=["DEFENSIVE"])[0]] == ["SHY"]
 
 
-def test_exclude_bonds_gives_none_plus_note(monkeypatch):
-    for word in ("bonds", "Treasuries"):
-        bonds, _, notes = _bonds(monkeypatch, "CONSERVATIVE", exclude=[word])
-        assert bonds == [] and any("Bonds were excluded" in n for n in notes)
-
 
 def test_requested_bond_counts_toward_quota(monkeypatch):
     bonds, *_ = _bonds(monkeypatch, "CONSERVATIVE", mustInclude=["BND"])
     assert sorted(b.symbol for b in bonds) == ["BND", "SHY"] and next(b for b in bonds if b.symbol == "BND").isUserRequested
+
+
+# ---------------- Wave 6A: general personalisation (5 profiles, zero case-specific code) ----------------
+from app import preferences
+from app.models import Filter
+
+INFO = {
+    "NVDA": {"sector": "technology", "industry": "semiconductors", "country": "united states", "longName": "nvidia"},
+    "MRNA": {"sector": "healthcare", "industry": "biotechnology", "country": "united states", "longName": "moderna"},
+    "VRTX": {"sector": "healthcare", "industry": "biotechnology", "country": "united states", "longName": "vertex"},
+    "BABA": {"sector": "consumer cyclical", "industry": "internet retail", "country": "china", "longName": "alibaba"},
+    "MO": {"sector": "consumer defensive", "industry": "tobacco", "country": "united states", "longName": "altria"},
+    "LMT": {"sector": "industrials", "industry": "aerospace & defense", "country": "united states", "longName": "lockheed"},
+    "XOM": {"sector": "energy", "industry": "oil & gas e&p", "country": "united states", "longName": "exxon"},
+    "KO": {"sector": "consumer defensive", "industry": "beverages - non-alcoholic", "country": "united states", "longName": "coca-cola"},
+}
+
+
+def _profile(monkeypatch, risk, prefs, resolved, picks):
+    """resolve() then discovery() with ONE fake llm.ask that serves both; returns (cands, notes, rp, llm agents called)."""
+    _bond_prices(monkeypatch)
+    monkeypatch.setattr(data, "company_info", lambda s: INFO.get(s, {}))
+    called = []
+
+    async def ask(**kw):
+        called.append(kw["agent"])
+        if kw["agent"] == "PREFERENCES":
+            return SimpleNamespace(data=resolved)
+        return SimpleNamespace(data=agents.DiscoveryOut(picks=[P(x) if not isinstance(x, tuple) else P(*x) for x in picks]),
+                               sources=SRC, citations=[])
+    monkeypatch.setattr(llm, "ask", ask)
+    intake = INTAKE.model_copy(update={"riskTolerance": risk, "preferences": Preferences(**prefs)})
+    rp = run(preferences.resolve(intake))
+    notes = []
+    cands, _ = run(agents.discovery(intake, count(1), notes_out=notes, rp=rp))
+    return cands, notes, rp, called
+
+
+def _syms(cands):
+    return [c.symbol for c in cands]
+
+
+def test_profile_no_gold(monkeypatch):
+    out = preferences.ResolveOut(exclude=Filter(assetClasses=["GOLD"]), interpretations=["'gold' -> excluding asset class GOLD"])
+    cands, notes, rp, called = _profile(monkeypatch, "AGGRESSIVE", {"exclude": ["gold"]}, out, ["NVDA"])
+    assert "GLD" not in _syms(cands) and any("Skipped gold" in n and "excluded" in n for n in notes)
+    assert called.count("PREFERENCES") == 1
+
+
+def test_profile_only_bio_stocks_skips_defensive_ballast_with_note(monkeypatch):
+    out = preferences.ResolveOut(only=Filter(industries=["Biotechnology"]), interpretations=["'bio stocks' -> only industry Biotechnology"])
+    cands, notes, rp, _ = _profile(monkeypatch, "MODERATE", {"onlyInclude": ["bio stocks"]}, out, ["MRNA", "VRTX", "NVDA"])
+    stocks = [c.symbol for c in cands if c.assetClass == "STOCKS"]
+    assert stocks == ["MRNA", "VRTX"]                                   # NVDA dropped, KO/BRK-B/... ballast skipped
+    assert any("defensive ballast" in n and "outside the universe you asked for" in n and "risk limit" in n for n in notes)
+    assert "SHY" in _syms(cands)                                        # bonds are still allowed ballast
+
+
+def test_profile_no_tech(monkeypatch):
+    out = preferences.ResolveOut(exclude=Filter(sectors=["Technology"]))
+    cands, _, _, _ = _profile(monkeypatch, "AGGRESSIVE", {"exclude": ["tech"]}, out, ["NVDA", "MRNA"])
+    assert _syms(cands)[:1] == ["MRNA"] and all(INFO.get(c.symbol, {}).get("sector") != "technology" for c in cands)
+
+
+def test_profile_no_chinese_companies(monkeypatch):
+    out = preferences.ResolveOut(exclude=Filter(countries=["China"]))
+    cands, _, _, _ = _profile(monkeypatch, "AGGRESSIVE", {"exclude": ["Chinese companies"]}, out, ["BABA", "NVDA"])
+    assert "BABA" not in _syms(cands) and "NVDA" in _syms(cands)
+
+
+def test_profile_ethical_excludes_industries(monkeypatch):
+    out = preferences.ResolveOut(exclude=Filter(industries=["Tobacco", "Aerospace & Defense", "Oil & Gas E&P"]))
+    cands, _, rp, _ = _profile(monkeypatch, "AGGRESSIVE", {"exclude": ["weapons", "tobacco", "oil"]}, out, ["MO", "LMT", "XOM", "MRNA"])
+    assert [c.symbol for c in cands if c.assetClass == "STOCKS"] == ["MRNA"]
+    assert "Tobacco" in preferences.prompt_text(rp)
+
+
+def test_profile_no_bonds_via_resolved_filter(monkeypatch):
+    out = preferences.ResolveOut(exclude=Filter(assetClasses=["BONDS"]))
+    cands, notes, _, _ = _profile(monkeypatch, "CONSERVATIVE", {"exclude": ["treasuries"]}, out, ["MRNA"])
+    assert not [c for c in cands if c.assetClass == "BONDS"] and any("bond ballast" in n for n in notes)
+
+
+def test_discovery_prompt_carries_resolved_preferences(monkeypatch):
+    _bond_prices(monkeypatch)
+    prompts = _capture(monkeypatch, agents.DiscoveryOut(picks=[]))
+    rp = ResolvedPreferences(only=Filter(industries=["Biotechnology"]), exclude=Filter(countries=["China"]),
+                             classTargets={"GOLD": 0})
+    run(agents.discovery(INTAKE.model_copy(update={"preferences": Preferences(onlyInclude=["bio"])}), count(1), rp=rp))
+    p = prompts[0]
+    assert "Biotechnology" in p and "China" in p and "NO GOLD" in p and "at least 5" in p

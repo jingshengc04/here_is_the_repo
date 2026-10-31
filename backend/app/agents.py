@@ -10,8 +10,8 @@ from typing import Iterator, Literal
 
 from pydantic import BaseModel, Field
 
-from . import config, data, llm
-from .models import AssetClass, Candidate, Finding, IntakeInput
+from . import config, data, llm, preferences
+from .models import AssetClass, Candidate, Finding, IntakeInput, ResolvedPreferences
 from src.tools.report_audit_tool import extract_data_points
 
 Sentiment = Literal["POSITIVE", "NEGATIVE", "NEUTRAL"]
@@ -143,8 +143,9 @@ DEFENSIVE = {"BRK-B": "Berkshire Hathaway", "JNJ": "Johnson & Johnson", "PG": "P
              "PEP": "PepsiCo", "WMT": "Walmart", "COST": "Costco", "MCD": "McDonald's", "V": "Visa", "MRK": "Merck"}
 
 
-async def defensive_picks(exclude: set[str], n: int = 2) -> list[tuple[str, str, float]]:
-    """The n lowest-weekly-volatility (5y) names from DEFENSIVE not in `exclude`: [(symbol, name, annualised vol %)]."""
+async def defensive_picks(exclude: set[str], n: int = 2, ok=None, skipped: list | None = None) -> list[tuple[str, str, float]]:
+    """The n lowest-weekly-volatility (5y) names from DEFENSIVE: [(symbol, name, annualised vol %)].
+    `ok(sym) -> (bool, reason)` is the preference matcher; rejected names are appended to `skipped` as (sym, reason)."""
     closes, _missing = await asyncio.to_thread(data.prices, list(DEFENSIVE), 5)  # caches parquet per symbol
     if closes is None or closes.empty:
         return []
@@ -153,7 +154,42 @@ async def defensive_picks(exclude: set[str], n: int = 2) -> list[tuple[str, str,
     for sym, v in vol.items():
         if sym in exclude or not await asyncio.to_thread(data.resolve, sym):
             continue
+        good, why = await ok(sym) if ok else (True, "")
+        if not good:
+            if skipped is not None:
+                skipped.append((sym, why))
+            continue
         out.append((sym, DEFENSIVE[sym], round(float(v), 1)))
+        if len(out) == n:
+            break
+    return out
+
+
+# Bond ballast is chosen by DATA (lowest 5y max drawdown): in 2022 only short treasuries cushioned stocks.
+BOND_POOL = {"SHY": "iShares 1-3 Year Treasury Bond ETF", "BIL": "SPDR 1-3 Month T-Bill ETF",
+             "VGSH": "Vanguard Short-Term Treasury ETF", "TIP": "iShares TIPS Bond ETF",
+             "BND": "Vanguard Total Bond Market ETF", "AGG": "iShares Core US Aggregate Bond ETF",
+             "IEF": "iShares 7-10 Year Treasury Bond ETF"}
+
+
+async def bond_picks(exclude: set[str], n: int, ok=None, skipped: list | None = None) -> list[tuple[str, str, float]]:
+    """The n BOND_POOL ETFs with the smallest 5y max drawdown: [(symbol, name, max drawdown %)] (negative numbers)."""
+    if n <= 0:
+        return []
+    closes, _missing = await asyncio.to_thread(data.prices, list(BOND_POOL), 5)  # caches parquet per symbol
+    if closes is None or closes.empty:
+        return []
+    dd = ((closes / closes.cummax() - 1).min() * 100).dropna().sort_values(ascending=False)
+    out = []
+    for sym, v in dd.items():
+        if sym in exclude or not await asyncio.to_thread(data.resolve, sym):
+            continue
+        good, why = await ok(sym) if ok else (True, "")
+        if not good:
+            if skipped is not None:
+                skipped.append((sym, why))
+            continue
+        out.append((sym, BOND_POOL[sym], round(float(v), 1)))
         if len(out) == n:
             break
     return out
@@ -168,83 +204,60 @@ STYLE_HINTS = {
     "ESG": "ESG-friendly names (avoid fossil fuels, tobacco, weapons)",
     "DEFENSIVE": "defensive, low-volatility names",
 }
-ESG_INDUSTRIES = ("oil & gas", "coal", "tobacco", "aerospace & defense", "uranium")
 
 
 def target_count(pct: float) -> int:
     return min(8, max(2, math.ceil(pct / 10) + 1))
 
 
-BOND_ETFS = {"SHY", "BND", "AGG", "TIP", "IEF", "VGSH", "SCHO", "BIL", "GOVT", "TLT"}
-# Bond ballast is chosen by DATA (lowest 5y max drawdown): in 2022 only short treasuries cushioned stocks.
-BOND_POOL = {"SHY": "iShares 1-3 Year Treasury Bond ETF", "BIL": "SPDR 1-3 Month T-Bill ETF",
-             "VGSH": "Vanguard Short-Term Treasury ETF", "TIP": "iShares TIPS Bond ETF",
-             "BND": "Vanguard Total Bond Market ETF", "AGG": "iShares Core US Aggregate Bond ETF",
-             "IEF": "iShares 7-10 Year Treasury Bond ETF"}
-BOND_WORDS = ("bond", "treasur", "fixed income", "fixed-income")
+async def _ok(sym: str, rp: ResolvedPreferences, name: str | None = None) -> tuple[bool, str]:
+    """THE preference check: the one matcher (preferences.allowed) on the symbol's Yahoo profile."""
+    p = await asyncio.to_thread(preferences.profile, sym)
+    if name and not p["longName"]:
+        p["longName"] = name.lower()
+    return preferences.allowed(sym, rp, p)
 
 
-def _asset_class(sym: str) -> str:
-    return ("CRYPTO" if data.is_crypto(sym) else "GOLD" if sym == "GLD" else "BONDS" if sym in BOND_ETFS else "STOCKS")
+def _skip_note(kind: str, skipped: list[tuple[str, str]], got: int, wanted: int) -> str | None:
+    if not skipped:
+        return None
+    names = ", ".join(s for s, _ in skipped[:3]) + (f" and {len(skipped) - 3} more" if len(skipped) > 3 else "")
+    msg = f"Skipped {names} as {kind}: {skipped[0][1]}."
+    if got < wanted:
+        msg += f" No allowed {kind} was available, so the portfolio has less cushioning and the risk limit may be harder to meet."
+    return msg
 
 
-async def bond_picks(exclude: set[str], n: int) -> list[tuple[str, str, float]]:
-    """The n BOND_POOL ETFs with the smallest 5y max drawdown: [(symbol, name, max drawdown %)] (negative numbers)."""
-    if n <= 0:
-        return []
-    closes, _missing = await asyncio.to_thread(data.prices, list(BOND_POOL), 5)  # caches parquet per symbol
-    if closes is None or closes.empty:
-        return []
-    dd = ((closes / closes.cummax() - 1).min() * 100).dropna().sort_values(ascending=False)
-    out = []
-    for sym, v in dd.items():
-        if sym in exclude or not await asyncio.to_thread(data.resolve, sym):
-            continue
-        out.append((sym, BOND_POOL[sym], round(float(v), 1)))
-        if len(out) == n:
-            break
-    return out
-
-
-async def _is_excluded(c: Candidate, exclude: list[str], esg: bool) -> bool:
-    syms = {x.strip().upper() for x in exclude}
-    if c.symbol in syms or c.symbol.removesuffix("-USD") in syms:
-        return True
-    words = [x.strip().lower() for x in exclude if len(x.strip()) > 2]
-    if not words and not esg:
-        return False
-    info = {} if c.assetClass == "CRYPTO" else await asyncio.to_thread(data.company_info, c.symbol)
-    hay = " ".join([info.get("sector", ""), info.get("industry", ""), info.get("longName", ""), c.name.lower()])
-    return any(w in hay for w in words) or (esg and any(w in f"{info.get('sector', '')} {info.get('industry', '')}" for w in ESG_INDUSTRIES))
-
-
-async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes_out: list[str] | None = None
-                    ) -> tuple[list[Candidate], list[Finding]]:
+async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes_out: list[str] | None = None,
+                    rp: ResolvedPreferences | None = None) -> tuple[list[Candidate], list[Finding]]:
     pr = intake.preferences
-    must = [m.strip().upper() for m in (pr.mustInclude if pr else []) if m.strip()]
-    exclude = list(pr.exclude) if pr else []
+    rp = rp or ResolvedPreferences(mustInclude=[m.strip().upper() for m in (pr.mustInclude if pr else []) if m.strip()])
+    must = [m.upper() for m in rp.mustInclude]
     styles = list(pr.styles) if pr else []
-    targets = (pr.assetClassTargets or {}) if pr else {}
+    targets = {**((pr.assetClassTargets or {}) if pr else {}), **rp.classTargets}
     notes = pr.notes if pr else None
     note = (lambda m: notes_out.append(m)) if notes_out is not None else (lambda m: None)
 
     def count_txt(cls: str, default: str) -> str:
         if cls in targets:
             return "no" if targets[cls] == 0 else f"at least {target_count(targets[cls])}"
+        if cls == "STOCKS" and not rp.only.is_empty() and preferences._only_covers(rp.only, "STOCKS"):
+            return "at least 5 (all matching the ONLY filter)"
         return default
 
     prompt = (
         f"You are the Discovery analyst. {_context(notes)}\n"
         f"Investor: ${intake.amountUsd:,.0f}, {intake.horizonYears}-year horizon, "
         f"{intake.riskTolerance} risk, theme: {intake.theme or 'none (broad diversified growth)'}.\n"
-        f"Run 2-3 Google searches, then pick {count_txt('STOCKS', '4-6')} stocks (mix of leaders plus small/mid caps or suppliers) and "
+        + (f"Resolved preferences (hard rules): {preferences.prompt_text(rp)}\n" if preferences.prompt_text(rp) else "")
+        + f"Run 2-3 Google searches, then pick {count_txt('STOCKS', '4-6')} stocks (mix of leaders plus small/mid caps or suppliers) and "
         f"{count_txt('CRYPTO', '3-5' if 'MEME' in styles else '2-3')} cryptocurrencies suited to the theme and risk level. "
         "Symbols in yfinance form (NVDA, BTC-USD). "
         + (f"Investment styles to favour: {'; '.join(STYLE_HINTS[x] for x in styles)}. " if styles else "")
-        + (f"NEVER pick any of these symbols/sectors/words: {', '.join(exclude)}. " if exclude else "")
         + (f"The investor insists on {', '.join(must)}; they are added automatically, do not spend picks on them. " if must else "")
         + "One-sentence thesis per pick (at most 25 words, dated figures only). No bear-case research. "
-        "Defensive low-volatility large caps (e.g. JNJ, PG), bond ETFs and gold are added automatically afterwards, so focus on the theme."
+        "Defensive low-volatility large caps, bond ETFs and gold may be added automatically afterwards (only if the "
+        "investor's preferences allow), so focus on the theme."
     )
     res = await llm.ask(model=FLASH, input=prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY",
                         on_step=on_step, generation_config=LOW)
@@ -256,7 +269,11 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
         if not await asyncio.to_thread(data.resolve, sym):
             await _notify(on_step, f"Dropped {sym}: no market data found")
             continue
-        cands.append(Candidate(symbol=sym, name=p.name, assetClass=p.assetClass, isUserRequested=sym in must))
+        good, why = await _ok(sym, rp, p.name)
+        if not good:
+            await _notify(on_step, f"Dropped {sym}: {why}")
+            continue
+        cands.append(Candidate(symbol=sym, name=p.name, assetClass=preferences.asset_class(sym), isUserRequested=sym in must))
         raws.append(RawFinding(symbol=sym, claim=p.thesis, sentiment="POSITIVE"))
     for sym in must:  # user-requested symbols are always candidates, if they exist
         if any(c.symbol == sym for c in cands):
@@ -265,14 +282,21 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
             await _notify(on_step, f"Could not find market data for requested symbol {sym}")
             note(f"Requested {sym} could not be resolved (no market data), so it was left out.")
             continue
-        cands.append(Candidate(symbol=sym, name=sym, assetClass=_asset_class(sym), isUserRequested=True))
+        cands.append(Candidate(symbol=sym, name=sym, assetClass=preferences.asset_class(sym), isUserRequested=True))
         raws.append(RawFinding(symbol=sym, claim="Included at the investor's request.", sentiment="NEUTRAL"))
-    if intake.riskTolerance in ("CONSERVATIVE", "MODERATE") or "DEFENSIVE" in styles:
-        for sym, name, v in await defensive_picks({c.symbol for c in cands} | {x.upper() for x in exclude},
-                                                  3 if "DEFENSIVE" in styles else 2):
+
+    ok = lambda sym: _ok(sym, rp)  # noqa: E731  (our defaults must pass the same matcher as everything else)
+    taken = {c.symbol for c in cands}
+    if (intake.riskTolerance in ("CONSERVATIVE", "MODERATE") or "DEFENSIVE" in styles) and targets.get("STOCKS") != 0:
+        want, skipped = (3 if "DEFENSIVE" in styles else 2), []
+        picks = await defensive_picks(taken, want, ok, skipped)
+        for sym, name, v in picks:
             cands.append(Candidate(symbol=sym, name=name, assetClass="STOCKS"))
             raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
                                    claim=f"Added as defensive ballast for a {intake.riskTolerance} profile (5y weekly vol {v}%)."))
+        if msg := _skip_note("defensive ballast", skipped, len(picks), want):
+            note(msg)
+
     bond_target = targets.get("BONDS")
     n_bonds = {"CONSERVATIVE": 2, "MODERATE": 1}.get(intake.riskTolerance, 0)
     if "DEFENSIVE" in styles:
@@ -281,28 +305,25 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
         n_bonds = max(n_bonds, 2 if bond_target > 25 else 1)  # 25% max per holding => need 2+ for targets above 25
     elif bond_target == 0:
         n_bonds = 0
-    if n_bonds and any(w in x.lower() for x in exclude for w in BOND_WORDS):
-        note("Bonds were excluded by your preferences, so no bond candidates were added.")
-        n_bonds = 0
-    n_bonds -= sum(1 for c in cands if c.assetClass == "BONDS")  # e.g. user already requested one
-    for sym, name, dd in await bond_picks({c.symbol for c in cands} | {x.upper() for x in exclude}, n_bonds):
-        cands.append(Candidate(symbol=sym, name=name, assetClass="BONDS"))
-        raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
-                               claim=f"Added as bond ballast for a {intake.riskTolerance} profile (5y max drawdown {dd}%)."))
-    if not any(c.symbol == "GLD" for c in cands):
-        cands.append(Candidate(symbol="GLD", name="SPDR Gold Shares", assetClass="GOLD"))
-        raws.append(RawFinding(symbol="GLD", claim="Gold is added as a diversifying hedge against equity and crypto drawdowns.", sentiment="NEUTRAL"))
+    have = sum(1 for c in cands if c.assetClass == "BONDS")  # e.g. user already requested one
+    if n_bonds - have > 0:
+        skipped = []
+        picks = await bond_picks({c.symbol for c in cands}, n_bonds - have, ok, skipped)
+        for sym, name, dd in picks:
+            cands.append(Candidate(symbol=sym, name=name, assetClass="BONDS"))
+            raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
+                                   claim=f"Added as bond ballast for a {intake.riskTolerance} profile (5y max drawdown {dd}%)."))
+        if msg := _skip_note("bond ballast", skipped, len(picks), n_bonds - have):
+            note(msg)
 
-    if exclude or "ESG" in styles:  # Python post-filter: never return excluded symbols/words
-        flags = await asyncio.gather(*(_is_excluded(c, exclude, "ESG" in styles) for c in cands))
-        for c, bad in zip(cands, flags):
-            if bad:
-                await _notify(on_step, f"Dropped {c.symbol}: matches your exclusions")
-                if c.isUserRequested:
-                    note(f"{c.symbol} was requested but also matches your exclusions, so it was left out.")
-        keep = {c.symbol for c, bad in zip(cands, flags) if not bad}
-        cands = [c for c in cands if c.symbol in keep]
-        raws = [r for r in raws if r.symbol in keep]
+    if not any(c.assetClass == "GOLD" for c in cands):
+        good, why = await _ok("GLD", rp)
+        if good:
+            cands.append(Candidate(symbol="GLD", name="SPDR Gold Shares", assetClass="GOLD"))
+            raws.append(RawFinding(symbol="GLD", claim="Gold is added as a diversifying hedge against equity and crypto drawdowns.", sentiment="NEUTRAL"))
+        else:
+            note(f"Skipped gold (GLD): {why}.")
+
     for cls in ("STOCKS", "CRYPTO"):
         have = sum(1 for c in cands if c.assetClass == cls)
         if targets.get(cls) and have < target_count(targets[cls]):
