@@ -125,11 +125,23 @@ type ErrorCode = "VALIDATION_ERROR" | "RUN_NOT_FOUND" | "RATE_LIMITED" | "INTERN
 // ---------- Input ----------
 export type RiskTolerance = "CONSERVATIVE" | "MODERATE" | "AGGRESSIVE";
 
+export type Style = "GROWTH" | "VALUE" | "DIVIDEND" | "MOMENTUM" | "MEME" | "ESG" | "DEFENSIVE";
+
+// Personalisation, filled by the Intake chat (show on the confirm card as editable chips)
+export interface Preferences {
+  mustInclude?: string[];   // ≤ 10 symbols the user insists on, e.g. ["DOGE-USD","NVDA"]
+  exclude?: string[];       // ≤ 20 symbols OR plain words, e.g. ["TSLA","oil","tobacco"]
+  assetClassTargets?: Partial<Record<AssetClass, number>> | null; // e.g. {CRYPTO: 30}; each 0–100, sum ≤ 100
+  styles?: Style[];
+  notes?: string | null;    // ≤ 500 chars free text, e.g. "companies I use every day"
+}
+
 export interface IntakeInput {
   amountUsd: number;        // 100 – 10_000_000
   horizonYears: number;     // integer 1 – 10
   riskTolerance: RiskTolerance;
   theme?: string;           // optional focus, ≤ 200 chars, e.g. "AI infrastructure"
+  preferences?: Preferences | null;  // NEW (optional)
 }
 
 // ---------- Chat onboarding ----------
@@ -142,6 +154,7 @@ export interface IntakeTurn {
     horizonYears: number | null;
     riskTolerance: RiskTolerance | null;
     theme: string | null;
+    preferences: Preferences | null;   // NEW: draft preferences gathered so far
   };
   isComplete: boolean;               // true ⇒ amountUsd, horizonYears, riskTolerance non-null
 }
@@ -187,6 +200,7 @@ export interface Holding {
   findingIds: string[];     // evidence → look up in Report.findings
   financialScore: number | null;  // 1–10, stocks only
   sentimentScore: number | null;  // -1.0 … 1.0 (SOCIAL + NEWS blend)
+  isUserRequested?: boolean;      // NEW: true if from preferences.mustInclude, so show a "you asked for this" tag
 }
 
 export interface AssetClassSlice {
@@ -257,6 +271,7 @@ export interface Report {
   rounds: Round[];          // 1 or 2 — show round 1 → 2 diff when length is 2
   findings: Finding[];
   disclaimer: string;       // always render
+  preferenceNotes?: string[];    // NEW: how each preference was honoured or why it was capped, e.g. "DOGE capped at 2%: Conservative -20% drawdown limit". Render under the summary
 }
 
 // ---------- SSE events ----------
@@ -316,6 +331,7 @@ Screens (one page, top to bottom, replacing wireframes ① and ②):
 - **Backtest:** line chart of `equityCurve` (4 series) + metrics table; show `crossCheck.isMatch` as a "✓ Verified" badge.
 - **Stream:** native `EventSource`. Handle `onerror` by falling back to polling `GET /api/runs/{runId}` every 3 s.
 - **Mock mode:** with `NEXT_PUBLIC_USE_MOCK=true`, replay the fixture's `rounds` on a timer so the agent lanes, round-1 rejection and round-2 approval all animate. The demo has to work with the backend off.
+- **Personalisation:** the confirm card shows `preferences` as editable chips (must include / exclude / styles / class targets / notes). The results page tags holdings with `isUserRequested`, and lists `preferenceNotes` under the summary, so the user sees their wishes were heard even when risk limits capped them.
 - **Retry buttons (frontend-only, no new endpoint):**
   - On `run.failed`, a stream error or a 5xx, show **Try again**, which re-sends `POST /api/runs` with the same intake. On 429, wait 5 seconds and retry.
   - On the results page, show **Run again** (same intake) and **Edit & run again** (back to the confirm card).

@@ -1,7 +1,7 @@
 """Pydantic v2 mirror of docs/API_CONTRACT.md. Field names are the contract's camelCase names."""
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, model_validator, Field
 
 RiskTolerance = Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"]
 RunStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED"]
@@ -11,11 +11,33 @@ SeriesKey = Literal["PORTFOLIO", "SPY", "SIXTY_FORTY", "EQUAL_WEIGHT"]
 ErrorCode = Literal["VALIDATION_ERROR", "RUN_NOT_FOUND", "RATE_LIMITED", "INTERNAL"]
 
 
+Style = Literal["GROWTH", "VALUE", "DIVIDEND", "MOMENTUM", "MEME", "ESG", "DEFENSIVE"]
+
+
+class Preferences(BaseModel):
+    """Personalisation captured by the Intake chat. Every agent reads it; the Verifier checks it."""
+    mustInclude: list[str] = Field(default_factory=list, max_length=10)   # symbols the user insists on, e.g. ["DOGE-USD","NVDA"]
+    exclude: list[str] = Field(default_factory=list, max_length=20)       # symbols OR plain words: ["TSLA","oil","tobacco"]
+    assetClassTargets: dict[AssetClass, float] | None = None             # e.g. {"CRYPTO": 30}; each 0–100, sum ≤ 100
+    styles: list[Style] = Field(default_factory=list, max_length=7)
+    notes: str | None = Field(default=None, max_length=500)              # free text every agent reads
+
+    @model_validator(mode="after")
+    def _targets_ok(self):
+        t = self.assetClassTargets or {}
+        if any(not 0 <= v <= 100 for v in t.values()) or sum(t.values()) > 100:
+            raise ValueError("assetClassTargets must each be 0–100 and sum to at most 100")
+        if any(len(x) > 40 for x in self.mustInclude + self.exclude):
+            raise ValueError("symbols/words must be at most 40 chars")
+        return self
+
+
 class IntakeInput(BaseModel):
     amountUsd: float = Field(ge=100, le=10_000_000)
     horizonYears: int = Field(ge=1, le=10)
     riskTolerance: RiskTolerance
     theme: str | None = Field(default=None, max_length=200)
+    preferences: Preferences | None = None
 
 
 class ChatMessage(BaseModel):
@@ -32,6 +54,7 @@ class IntakeDraft(BaseModel):
     horizonYears: int | None = None
     riskTolerance: RiskTolerance | None = None
     theme: str | None = None
+    preferences: Preferences | None = None
 
 
 class IntakeTurn(BaseModel):
@@ -74,6 +97,7 @@ class Holding(BaseModel):
     findingIds: list[str]
     financialScore: float | None
     sentimentScore: float | None
+    isUserRequested: bool = False   # true if the symbol came from preferences.mustInclude
 
 
 class AssetClassSlice(BaseModel):
@@ -150,6 +174,7 @@ class Report(BaseModel):
     rounds: list[Round]
     findings: list[Finding]
     disclaimer: str
+    preferenceNotes: list[str] = Field(default_factory=list)  # how each preference was honoured, or why it was capped
 
 
 class Run(BaseModel):
