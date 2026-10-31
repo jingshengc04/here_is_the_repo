@@ -191,6 +191,33 @@ def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: lis
     ]
 
 
+def _crypto_cap(weights: dict[str, float], cands: dict[str, Candidate], closes: pd.DataFrame,
+                limit: float) -> tuple[float, float] | None:
+    """Largest total CRYPTO % (crypto holdings scaled together, rest scaled up, cap applied) whose backtested
+    max drawdown still meets `limit`. Deterministic bisection on the engine; None if even 0% crypto fails."""
+    syms = list(weights)
+    crypto = [s for s in syms if cands[s].assetClass == "CRYPTO"]
+    cur = sum(weights[s] for s in crypto)
+    if not crypto or cur <= 0 or len(crypto) == len(syms):
+        return None
+
+    def dd_at(c: float) -> tuple[list[float], float]:
+        w = [weights[s] * (c / cur if s in crypto else (100 - c) / (100 - cur)) for s in syms]
+        w = project(w)
+        cw = {s: x / 100 for s, x in zip(syms, w)}
+        curve = engine.equity_curve(closes, cw)
+        return w, float((curve / curve.cummax() - 1).min() * 100)
+
+    if dd_at(0.0)[1] < limit:
+        return None
+    lo, hi = 0.0, cur
+    for _ in range(12):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if dd_at(mid)[1] >= limit else (lo, mid)
+    w, dd = dd_at(lo)
+    return round(sum(x for s, x in zip(syms, w) if s in crypto), 1), round(dd, 1)
+
+
 def _gen(level: str) -> dict:
     ok = "generation_config" in inspect.signature(llm.ask).parameters
     return {"generation_config": {"thinking_level": level}} if ok else {}
@@ -257,7 +284,7 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         async def sandbox(df: pd.DataFrame, w: dict) -> dict:
             r = await _ask(model=config.MODEL_FLASH,
                            input=[llm.text_part(engine.sandbox_prompt(w)), llm.csv_part(df)],
-                           tools=["code_execution"], agent="VERIFIER", on_step=on_step)
+                           tools=["code_execution"], agent="VERIFIER", on_step=on_step, **_gen("low"))
             return _parse_sandbox(r)
 
         await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER", "message": "Running backtest in sandbox"})
@@ -290,12 +317,20 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         if verification.isApproved:
             break
         m = bt.metrics["PORTFOLIO"]
+        hint = ""
+        if not checks[0].isPassed:
+            cap = _crypto_cap({h.symbol: h.weightPct for s in alloc.slices for h in s.holdings}, cands, closes,
+                              config.DRAWDOWN_LIMITS[risk])
+            if cap:
+                hint = (f"Computed by the backtest engine: with total CRYPTO at or below {cap[0]}% (crypto holdings "
+                        f"scaled down together, the rest scaled up), max drawdown ≈ {cap[1]}%. Keep total "
+                        f"CRYPTO at or below {cap[0]}%.\n")
         feedback = (
             f"\nROUND {n + 1}. The Verifier rejected your previous proposal.\n"
             f"Previous allocation (% weights): {', '.join(f'{h.symbol} {h.weightPct}%' for s in alloc.slices for h in s.holdings)}\n"
             f"Previous backtest: return {m.totalReturnPct}%, max drawdown {m.maxDrawdownPct}%, "
             f"volatility {m.volatilityPct}%, sharpe {m.sharpe}\n"
-            "Failed checks:\n" + "\n".join(f"- {c.name}: {c.detail}" for c in failed) + "\n"
+            f"{hint}Failed checks:\n" + "\n".join(f"- {c.name}: {c.detail}" for c in failed) + "\n"
             "changesRequested:\n" + "\n".join(f"- {c}" for c in changes) + "\n"
             "Fix exactly the failed checks listed; keep every other constraint satisfied; make the smallest "
             "changes that fix them (adjust the previous allocation, do not rewrite it).")

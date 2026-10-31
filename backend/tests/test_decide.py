@@ -150,3 +150,10 @@ def test_round2_prompt_has_failed_checks_and_constraints(fake):
         assert "25" in p and "effective" in p.lower() and "-35" in p
     assert "Max drawdown" in p2 and "Backtest max drawdown" in p2 and "smallest changes" in p2
     assert "BTC-USD 25.0%" in p2  # round-1 allocation included
+
+
+def test_round2_prompt_has_computed_crypto_cap(fake):
+    run()
+    p2 = fake["orch_inputs"][1]
+    m = re.search(r"total CRYPTO at or below ([\d.]+)%.*?drawdown (?:of )?≈ (-[\d.]+)%", p2)
+    assert m and float(m.group(1)) < 75 and float(m.group(2)) >= -35
