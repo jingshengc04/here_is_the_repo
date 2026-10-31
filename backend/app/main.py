@@ -129,3 +129,13 @@ async def run_events(run_id: str, request: Request):
 
     return StreamingResponse(gen(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+from .models import IntakeTurn, IntakeTurnRequest
+from . import intake
+
+
+@app.post("/api/intake/messages")
+async def intake_messages(req: IntakeTurnRequest) -> IntakeTurn:
+    return await intake.intake_turn(req)
+
