@@ -102,3 +102,53 @@ def test_preference_notes_from_decide_plus_discovery_notes(fakes, monkeypatch):
 def test_preference_notes_default_empty_when_decide_has_none(fakes):
     report, _ = go()
     assert report.preferenceNotes == []
+
+
+def test_resolver_runs_once_prefs_flow_to_agents_and_decide(fakes, monkeypatch):
+    from app import preferences
+    from app.models import Filter, Preferences, ResolvedPreferences
+    rp = ResolvedPreferences(exclude=Filter(sectors=["Technology"]), interpretations=["'no tech' -> excluding sector Technology"])
+    calls, seen = [], {}
+
+    async def resolve(intake):
+        calls.append(1)
+        return rp
+    monkeypatch.setattr(preferences, "resolve", resolve)
+
+    async def discovery(intake, ids, on_step=None, notes_out=None, rp=None, **kw):
+        seen["discovery_rp"] = rp
+        return [Candidate(symbol="NVDA", name="Nvidia", assetClass="STOCKS")], []
+
+    async def news(syms, ids, on_step=None, notes=None, **kw):
+        seen["news_notes"] = notes
+        return []
+    monkeypatch.setattr(agents, "discovery", discovery)
+    monkeypatch.setattr(agents, "news", news)
+
+    async def decide(intake, cands, findings, emit, prefs=None):
+        seen["decide_prefs"] = prefs
+        return ROUNDS
+    sys.modules["app.decide"].decide = decide
+    sys.modules["app.decide"].preference_notes = lambda intake, rounds: ["decide note"]
+
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+    intake = INTAKE.model_copy(update={"preferences": Preferences(exclude=["tech"], notes="my note")})
+    report = asyncio.run(pipeline.run_pipeline("run_x", intake, emit))
+    assert calls == [1] and seen["discovery_rp"] is rp and seen["decide_prefs"] is rp
+    assert "my note" in seen["news_notes"] and "Technology" in seen["news_notes"]
+    assert report.preferenceNotes[:2] == ["'no tech' -> excluding sector Technology", "decide note"]
+    prog = [e for e in events if e["type"] == "agent.progress" and "Understanding your preferences" in e["message"]]
+    assert prog and prog[0]["agent"] == "DISCOVERY" and events[0]["type"] == "run.started" and events.index(prog[0]) == 1
+
+
+def test_resolver_failure_never_fails_the_run_but_is_disclosed(fakes, monkeypatch):
+    from app import preferences
+
+    async def boom(intake):
+        raise RuntimeError("gemini down")
+    monkeypatch.setattr(preferences, "resolve", boom)
+    report, _ = go()
+    assert report.preferenceNotes and "not applied" in report.preferenceNotes[0]

@@ -71,6 +71,8 @@ async def amain(args) -> int:
         prefs["mustInclude"] = args.must_include.split(",")
     if args.exclude:
         prefs["exclude"] = args.exclude.split(",")
+    if args.only_include:
+        prefs["onlyInclude"] = args.only_include.split(",")
     if args.styles:
         prefs["styles"] = args.styles.split(",")
     if args.targets:
@@ -106,6 +108,7 @@ async def amain(args) -> int:
               + "".join(f"\n   - {x}" for x in rd["verification"]["changesRequested"]))
     print("candidates:", ", ".join(f"{h['symbol']}{'*' if h.get('isUserRequested') else ''}"
                                   for sl in rep["finalAllocation"]["slices"] for h in sl["holdings"]), "(* = user requested)")
+    print("interpretations:", [n for n in (rep.get("preferenceNotes") or [])][:6])
     print("preference notes:", rep.get("preferenceNotes") or [])
     print("final weights:")
     for s in rep["finalAllocation"]["slices"]:
@@ -130,6 +133,7 @@ if __name__ == "__main__":
     ap.add_argument("--theme", default="AI infrastructure")
     ap.add_argument("--must-include", default="")
     ap.add_argument("--exclude", default="")
+    ap.add_argument("--only-include", default="")
     ap.add_argument("--styles", default="")
     ap.add_argument("--targets", default="", help="e.g. CRYPTO=30,STOCKS=50")
     ap.add_argument("--notes", default="")
