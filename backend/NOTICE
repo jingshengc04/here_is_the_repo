@@ -1,0 +1,10 @@
+backend/backtest/** and backend/src/tools/{financial_rigor_tool,report_audit_tool}.py are vendored
+UNMODIFIED from Vibe-Trading (https://github.com/HKUDS/Vibe-Trading, commit 78fab6b3f998583f640820db60c155ffa5641a62),
+MIT License, Copyright (c) 2026 Vibe-Trading Contributors.
+
+Exceptions (ponytail stubs, not upstream code):
+  backend/backtest/loaders/registry.py  - identity @register; upstream registry needs src.config
+  backend/src/config/accessor.py        - disables upstream opt-in cache, reads SEC_USER_AGENT env
+  backend/src/agent/tools.py            - empty BaseTool base class
+
+Do not edit vendored files. Re-sync from upstream if a metric bug is fixed there.
