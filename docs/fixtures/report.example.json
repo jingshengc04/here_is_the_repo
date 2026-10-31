@@ -1648,6 +1648,11 @@
       "sandboxTotalReturnPct": 118.4,
       "independentTotalReturnPct": 118.2,
       "isMatch": true
+     },
+     "sharpeCi": {
+      "lower": -0.21,
+      "upper": 1.43,
+      "probPositive": 0.86
      }
     },
     "verification": {
@@ -1672,6 +1677,11 @@
        "name": "Single holding \u2264 25%",
        "isPassed": true,
        "detail": "Largest: GLD 25.0%"
+      },
+      {
+       "name": "Sharpe 95% CI lower bound > 0",
+       "isPassed": false,
+       "detail": "95% CI -0.21 to 1.43"
       }
      ],
      "changesRequested": [
@@ -3182,6 +3192,11 @@
       "sandboxTotalReturnPct": 96.2,
       "independentTotalReturnPct": 96.0,
       "isMatch": true
+     },
+     "sharpeCi": {
+      "lower": 0.07,
+      "upper": 1.41,
+      "probPositive": 0.97
      }
     },
     "verification": {
@@ -3206,6 +3221,11 @@
        "name": "Single holding \u2264 25%",
        "isPassed": true,
        "detail": "Largest: GLD 25.0%"
+      },
+      {
+       "name": "Sharpe 95% CI lower bound > 0",
+       "isPassed": true,
+       "detail": "95% CI 0.07 to 1.41"
       }
      ],
      "changesRequested": []

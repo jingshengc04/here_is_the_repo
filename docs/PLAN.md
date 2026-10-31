@@ -51,6 +51,29 @@ Model.model_validate_json(i.output_text)
 - Latency: about 5s for a basic call, about 10s with search or code execution. Budget about 2–3 minutes for a full run.
 - ✅ yfinance works: `yf.download([...], period="5y", interval="1wk", auto_adjust=True)["Close"]` returns 262 rows. `Ticker(s).info["trailingPE"]` works too.
 
+## Inherited from Vibe-Trading (`HKUDS/Vibe-Trading`, MIT)
+
+The clone is at `../salmon/Vibe-Trading` locally. I live-tested the vendored modules on real yfinance data (NVDA/MSFT/BTC/GLD):
+max drawdown -48.6%, Sharpe ratio 1.01 with a 95% bootstrap confidence interval of **0.07–1.89**, and risk-parity weights GLD 47 / MSFT 25 / BTC 15 / NVDA 14.
+
+| What | Source | How we use it |
+|---|---|---|
+| **Risk x-ray** `compute_risk_xray(closes, weights, periods_per_year=52)` | `agent/backtest/risk_xray.py` | **Vendor.** Verifier's drawdown, volatility, VaR/ES tails, concentration (HHI) and correlation. It's the independent recompute side of `crossCheck` |
+| **Bootstrap Sharpe CI** `bootstrap_sharpe_ci(equity, bars_per_year=52)` | `agent/backtest/validation.py` | **Vendor.** Fills `Backtest.sharpeCi`, and the Verifier rejects the portfolio if the lower bound is ≤ 0. Strip `sharpe_samples` before emitting |
+| **Metrics helpers** (`period_returns`, `effective_bars_per_year`) | `agent/backtest/metrics.py` (+ `models.py`) | **Vendor.** `risk_xray` and `validation` depend on them |
+| **Risk-parity / inverse-vol optimizers** `RiskParityOptimizer()._calc_weights({"cov": cov})` | `agent/backtest/optimizers/` | **Vendor.** Gives the Orchestrator a quant baseline ("risk parity would say GLD 47%") to anchor or justify its weights |
+| **Agent prompts** | `agent/src/swarm/presets/*.yaml` | **Adapt the text into `agents.py`:** `social_alpha_team` (Twitter/Reddit analysts → SOCIAL), `fundamental_research_team` (Financial, Valuation and Quality analysts → FINANCIALS), `sentiment_intelligence_team` (→ NEWS), `global_allocation_committee` allocator (→ ORCHESTRATOR), `risk_committee` Head of Risk (→ VERIFIER) |
+| **Domain checklists** | `agent/src/skills/{financial-statement,valuation-model,sentiment-analysis,social-media-intelligence,asset-allocation,risk-analysis}/` | **Adapt:** pull the key bullet points into each agent's prompt (one paragraph at most, to keep prompts short) |
+
+**Not inherited, and why:**
+- **Swarm runtime** (langchain/langgraph, 50 iterations and 1,800s timeouts per agent, file-based task store): far too slow for a 3-minute demo. We use one Gemini call per agent instead.
+- **`api_server.py`:** a different API shape; we follow our contract.
+- **The vibe-trading React frontend:** the team is building in Next.js.
+- **The 40+ loaders and registry:** yfinance alone covers stocks, crypto and gold.
+- **The grounding/evidence ledger:** our `Finding.sources` covers it.
+
+`ponytail:` we vendor about 1.6k lines instead of `pip install vibe-trading-ai`, because that package pulls in langchain, tushare, akshare, ccxt, duckdb and more (a slow Cloud Run build). Re-sync the copy if upstream fixes a metric bug.
+
 ## File layout (target)
 
 ```
@@ -62,16 +85,23 @@ backend/
     llm.py        # one ask() helper: tools, schema, retries, logging
     data.py       # yfinance prices and financial statements, with on-disk cache
     agents.py     # 7 agent functions (prompt + schema each)
-    backtest.py   # independent pandas engine and sandbox call
+    engine.py     # equity curves, benchmarks, sandbox call, crossCheck (uses vendored backtest/)
     pipeline.py   # orchestration and event emission
-  tests/test_backtest.py
-  pyproject.toml
+  backtest/       # VENDORED from Vibe-Trading, unmodified: __init__, models, metrics, validation, risk_xray, optimizers/
+  NOTICE          # MIT attribution for backtest/
+  tests/test_engine.py
+  pyproject.toml  # pandas<3 (vendored code and yfinance break on pandas 3), numpy, scipy
 Dockerfile
 ```
 
 ## Task list
 
 ### Phase 1 — Foundation (unblocks the frontend)
+
+**Task 0: Vendor the Vibe-Trading modules** · XS · *coordinator (me)*
+- [ ] Copy them into `backend/backtest/` unchanged and add `NOTICE`.
+- [ ] Smoke check: `compute_risk_xray`, `bootstrap_sharpe_ci` and `RiskParityOptimizer` all run on yfinance data.
+
 
 **Task 1: Contract-compliant server with a fake pipeline** · M
 Builds all 4 endpoints. A fake pipeline replays `fixtures/report.example.json` as timed SSE events, so the frontend can integrate against a real server within the first hour.
@@ -98,7 +128,7 @@ Builds all 4 endpoints. A fake pipeline replays `fixtures/report.example.json` a
 ### Phase 2 — Research agents (each one replaces part of the fake pipeline)
 
 **Task 4: Data layer** · S
-`prices(symbols, years=5)` → weekly closes as a DataFrame. `fundamentals(symbol)` → a dict of revenue, margins, debt, cash, P/E and so on. Results are cached to disk.
+`prices(symbols, years=5)` → **weekly** closes as a DataFrame (one frequency everywhere: the equity curve, the sandbox CSV, and `risk_xray`/bootstrap with 52 periods per year). `fundamentals(symbol)` → a dict of revenue, margins, debt, cash, P/E and so on. Results are cached to disk.
 - [ ] Works for `NVDA`, `BTC-USD`, `GLD`, `SPY`, `AGG`. Cached files survive a restart.
 - Files: `data.py`
 
@@ -108,12 +138,12 @@ Search grounding → 4–6 stocks and 2–3 coins, each with a finding and sourc
 - Files: `agents.py`, `pipeline.py`
 
 **Task 6: Financials agent** · S
-The financial statements for all stocks go to code execution in one call, which returns a 1–10 score and a verdict per stock.
+The financial statements for all stocks go to code execution in one call, which returns a 1–10 score and a verdict per stock. The prompt is adapted from `fundamental_research_team.yaml`: the Financial, Valuation and Quality analyst lenses folded into one call.
 - [ ] The `agent.progress` events show the sandbox code ran.
 - Files: `agents.py`
 
 **Task 7: Landscape, News and Social agents in parallel** · M
-Same pattern for all three, with different prompts. They run with `asyncio.gather`. If one fails, it emits `agent.failed` and the run continues without it.
+Same pattern for all three. The prompts are adapted from `social_alpha_team.yaml` (SOCIAL), `sentiment_intelligence_team.yaml` (NEWS) and `global_equities_desk.yaml` (LANDSCAPE). They run with `asyncio.gather`. If one fails, it emits `agent.failed` and the run continues without it.
 - [ ] Their events interleave in the stream. Killing one agent doesn't kill the run.
 - Files: `agents.py`, `pipeline.py`
 
@@ -123,18 +153,21 @@ Same pattern for all three, with different prompts. They run with `asyncio.gathe
 ### Phase 3 — Decision and verification
 
 **Task 8: Orchestrator** · S
-All findings and the intake go to Argon, which returns an `Allocation`. Python then normalises the weights and computes `amountUsd`.
+All findings, the intake **and the vendored risk-parity weights for the candidates** go to Argon, which returns an `Allocation`. The prompt is adapted from the allocator in `global_allocation_committee.yaml`. Python then normalises the weights and computes `amountUsd`.
 - [ ] Slice weights sum to exactly 100.0, and each slice equals the sum of its holdings.
 - Files: `agents.py`
 
 **Task 9: Backtest engine and sandbox cross-check** · M
-pandas calculates the metrics and equity curves for the portfolio and the 3 benchmarks (SPY, a 60/40 SPY/AGG mix, equal-weight). The same data as a CSV goes to code execution, and the two sets of results are compared.
-- [ ] `tests/test_backtest.py`: a known synthetic series gives the expected total return and max drawdown.
-- [ ] The sandbox and pandas total returns agree within 0.5 percentage points on a real portfolio.
-- Files: `backtest.py`, `tests/test_backtest.py`
+- `engine.py` builds weekly-rebalanced equity curves for the portfolio and the 3 benchmarks (SPY, a 60/40 SPY/AGG mix, equal-weight).
+- `Metrics` comes from vendored `compute_risk_xray` (drawdown, volatility) plus our total return and CAGR.
+- `sharpeCi` comes from vendored `bootstrap_sharpe_ci`.
+- The same weekly CSV goes to Gemini code execution, and `crossCheck` compares the sandbox's total return and max drawdown with ours.
+- [ ] `tests/test_engine.py`: a synthetic series [100,120,90,130,65,140] gives max drawdown -50% and the expected total return. The 60/40 weekly-rebalanced fixture from the live test gives 22.12%.
+- [ ] The sandbox and our total returns agree within 0.5 percentage points on a real portfolio.
+- Files: `engine.py`, `tests/test_engine.py` (do **not** edit `backtest/`)
 
 **Task 10: Verifier, rebalance loop and final report** · M
-Deterministic checks plus Argon writing `changesRequested`, then round 2 if needed, then `Report` assembly.
+Deterministic checks (drawdown limit for the risk level, weights sum to 100, max single holding 25%, `crossCheck.isMatch`, **Sharpe CI lower bound > 0**, and risk-x-ray concentration) plus Argon writing `changesRequested`. The prompt is adapted from the Head of Risk in `risk_committee.yaml`. Then round 2 if needed, then `Report` assembly.
 - [ ] An AGGRESSIVE-heavy crypto proposal under a MODERATE intake gets rejected in round 1 and approved in round 2.
 - [ ] `run.completed.report` validates against `models.Report`.
 - Files: `agents.py`, `pipeline.py`

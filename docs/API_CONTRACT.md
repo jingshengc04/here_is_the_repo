@@ -219,6 +219,10 @@ export interface Backtest {
     dates: string[];        // weekly points, ~260 for 5y
     series: Record<SeriesKey, number[]>; // growth of $1, same length as dates
   };
+  sharpeCi?: {              // PORTFOLIO only. 95% bootstrap CI on Sharpe (1000 resamples). Show as "Sharpe 0.74 (95% CI 0.07–1.41)"
+    lower: number; upper: number;
+    probPositive: number;   // 0–1, share of resamples with Sharpe > 0
+  } | null;
   crossCheck: {             // sandbox result vs. our independent recompute
     sandboxTotalReturnPct: number;
     independentTotalReturnPct: number;
