@@ -499,3 +499,52 @@ def test_thin_universe_adds_second_bond_and_notes_when_still_thin(monkeypatch):
 def test_healthy_universe_keeps_single_bond(monkeypatch):
     cands, *_ = _thin(monkeypatch)                                          # 6 stocks after the extra pass
     assert len([c for c in cands if c.assetClass == "BONDS"]) == 1
+
+
+# ---------------- Wave 9A: span-matched sources ----------------
+GROUNDED = ("Vertiv reported Q3 2026 organic orders up 60% as AI liquid cooling demand surged. "
+            "Arista Networks guided 2026 revenue to $9.5B on hyperscaler switch demand. "
+            "Gold fell below $4,000 an ounce on rising real yields.")
+
+
+def _span(sentence, title, url):
+    i = GROUNDED.index(sentence)
+    return {"title": title, "url": url, "start": i, "end": i + len(sentence)}
+
+
+def _cited_result():
+    sents = GROUNDED.replace("demand surged. ", "demand surged.|").replace("switch demand. ", "switch demand.|").split("|")
+    cites = [_span(sents[0], "vertiv.com", "http://u/vrt"), _span(sents[1], "arista.com", "http://u/anet"),
+             _span(sents[2], "kitco.com", "http://u/gold")]
+    return SimpleNamespace(grounded_text=GROUNDED, citations=cites, sources=[{"title": c["title"], "url": c["url"]} for c in cites])
+
+
+def test_each_finding_maps_to_its_own_citation_by_span():
+    res = _cited_result()
+    f = lambda claim, sym: agents._pick_sources(claim, sym, res)  # noqa: E731
+    assert [s["url"] for s in f("Vertiv organic orders rose 60% in Q3 2026 on AI liquid cooling demand", "VRT")] == ["http://u/vrt"]
+    assert [s["url"] for s in f("Arista guided to $9.5B of 2026 revenue on hyperscaler switch demand", "ANET")] == ["http://u/anet"]
+    assert [s["url"] for s in f("Gold dropped under $4,000 per ounce as real yields climbed", "GLD")] == ["http://u/gold"]
+
+
+def test_shared_number_decides_between_similar_segments():
+    res = _cited_result()
+    # wording overlaps nothing in particular, but "$9.5B" appears in exactly one segment
+    assert [s["url"] for s in agents._pick_sources("Sales outlook of $9.5B looks stretched", None, res)] == ["http://u/anet"]
+
+
+def test_no_span_match_falls_back_to_call_level_sources_and_is_marked():
+    res = _cited_result()
+    agents.SOURCE_STATS.clear()
+    out = agents._findings([agents.RawFinding(symbol="X", claim="Completely unrelated lithium mining permit delays", sentiment="NEGATIVE"),
+                            agents.RawFinding(symbol="VRT", claim="Vertiv organic orders rose 60% in Q3 2026", sentiment="POSITIVE")],
+                           "NEWS", count(1), res)
+    assert len(out[0].sources) >= 1 and {s.url for s in out[0].sources} <= {"http://u/vrt", "http://u/anet", "http://u/gold"}
+    assert [s.url for s in out[1].sources] == ["http://u/vrt"]
+    assert agents.SOURCE_STATS[("NEWS", "fallback")] == 1 and agents.SOURCE_STATS[("NEWS", "span")] == 1
+
+
+def test_titles_are_kept_verbatim_never_invented():
+    res = _cited_result()
+    res.citations[0]["title"] = ""
+    assert agents._pick_sources("Vertiv organic orders rose 60% in Q3 2026", "VRT", res)[0]["title"] == ""

@@ -104,33 +104,87 @@ def _tokens(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]{4,}", text.lower())} - _STOP
 
 
-def _pick_sources(claim: str, symbol: str | None, res, used: Counter | None = None) -> list[dict]:
-    """Up to 3 sources for ONE claim: citations whose title/url share keywords with it (best first, least-reused
-    first on ties). Only when nothing matches do we fall back to the call-level sources."""
-    used = used if used is not None else Counter()
-    words = _tokens(f"{claim} {symbol or ''}")
-    cites = list(getattr(res, "citations", None) or []) or list(res.sources or [])
-    scored = []
-    for c in cites:
-        score = len(words & _tokens(f"{c.get('title', '')} {c['url']}"))
-        if score:
-            scored.append((-score, used[c["url"]], c))
-    scored.sort(key=lambda t: t[:2])
-    pool = [c for *_, c in scored] or sorted(res.sources or [], key=lambda c: used[c["url"]])
+SPAN_THRESHOLD = 0.45
+SOURCE_STATS: Counter = Counter()  # (agent, "span" | "title" | "fallback" | "none") -> findings; lets a run report how sources were found
+_NUM = re.compile(r"\d[\d,]*\.?\d*")
+_ENT = re.compile(r"\b[A-Z][A-Za-z0-9&.\-]{1,}\b")
+
+
+def _numbers(text: str) -> set[str]:
+    """Figures in the text, minus calendar years (they appear in every sentence and say nothing about which one a claim came from)."""
+    nums = {n.replace(",", "").rstrip(".") for n in _NUM.findall(text)}
+    return {n for n in nums if not re.fullmatch(r"(19|20)\d\d", n)}
+
+
+def _entities(text: str) -> set[str]:
+    return {e.lower() for e in _ENT.findall(text)} - _STOP
+
+
+def _segments(res) -> list[tuple[str, list[dict]]]:
+    """[(grounded text covered by a citation span, [citations sharing that span])]; [] when offsets/text are missing."""
+    text = getattr(res, "grounded_text", "") or ""
+    by_span: dict[tuple[int, int], list[dict]] = {}
+    for c in getattr(res, "citations", None) or []:
+        st, en = c.get("start"), c.get("end")
+        if text and isinstance(st, int) and isinstance(en, int) and 0 <= st < en <= len(text):
+            by_span.setdefault((st, en), []).append(c)
+    return [(text[st:en], cs) for (st, en), cs in by_span.items()]
+
+
+def _span_score(claim: str, seg: str) -> float:
+    """Token recall of the claim in the segment, plus extra credit for shared numbers and named entities."""
+    ct, st = _tokens(claim), _tokens(seg)
+    base = len(ct & st) / len(ct) if ct else 0.0
+    return base + 0.5 * min(2, len(_numbers(claim) & _numbers(seg))) + 0.15 * min(3, len(_entities(claim) & _entities(seg)))
+
+
+def _pick(claim: str, symbol: str | None, res, used: Counter) -> tuple[list[dict], str]:
+    """(sources, how) for ONE claim. how = 'span' (matched a cited text span), 'title' (keyword match on citation titles),
+    'fallback' (call-level sources, nothing matched) or 'none'."""
+    scored = sorted(((_span_score(claim, seg), cs) for seg, cs in _segments(res)), key=lambda t: -t[0])
     out, seen = [], set()
-    for c in pool:
-        if c["url"] not in seen and len(out) < 3:
-            seen.add(c["url"])
+    best = scored[0][0] if scored else 0.0
+    for score, cs in scored:
+        if score < max(SPAN_THRESHOLD, 0.75 * best):  # the best segment, plus near-ties only
+            break
+        for c in sorted(cs, key=lambda c: used[c["url"]]):
+            if c["url"] not in seen and len(out) < 3:
+                seen.add(c["url"])
+                out.append({"title": c.get("title", ""), "url": c["url"]})  # publisher title kept verbatim, never invented
+    if out:
+        for c in out:
             used[c["url"]] += 1
-            out.append({"title": c.get("title", ""), "url": c["url"]})
-    return out
+        return out, "span"
+    words = _tokens(f"{claim} {symbol or ''}")  # second tier: citation title/url keywords (publisher names like vertiv.com)
+    titled = [c for c in (getattr(res, "citations", None) or []) if words & _tokens(f"{c.get('title', '')} {c['url']}")]
+    titled.sort(key=lambda c: (-len(words & _tokens(f"{c.get('title', '')} {c['url']}")), used[c["url"]]))
+    if titled:
+        picks, seen_t = [], set()
+        for c in titled:
+            if c["url"] not in seen_t and len(picks) < 3:
+                seen_t.add(c["url"]); picks.append(c); used[c["url"]] += 1
+        return [{"title": c.get("title", ""), "url": c["url"]} for c in picks], "title"
+    pool = sorted(res.sources or [], key=lambda c: used[c["url"]])  # call-level, least-reused first
+    for c in pool[:3]:
+        used[c["url"]] += 1
+    return [{"title": c.get("title", ""), "url": c["url"]} for c in pool[:3]], ("fallback" if pool else "none")
+
+
+def _pick_sources(claim: str, symbol: str | None, res, used: Counter | None = None) -> list[dict]:
+    return _pick(claim, symbol, res, used if used is not None else Counter())[0]
 
 
 def _findings(raws, agent, ids: Iterator[int], res=None, verified=None) -> list[Finding]:
     used: Counter = Counter()
-    return [Finding(id=f"f_{next(ids)}", agent=agent, symbol=r.symbol, claim=_trim(r.claim), sentiment=r.sentiment,
-                    sources=_pick_sources(r.claim, r.symbol, res, used) if res is not None else [],
-                    numbersVerified=(verified or {}).get(i)) for i, r in enumerate(raws)]
+    out = []
+    for i, r in enumerate(raws):
+        sources = []
+        if res is not None:
+            sources, how = _pick(r.claim, r.symbol, res, used)
+            SOURCE_STATS[(agent, how)] += 1
+        out.append(Finding(id=f"f_{next(ids)}", agent=agent, symbol=r.symbol, claim=_trim(r.claim), sentiment=r.sentiment,
+                           sources=sources, numbersVerified=(verified or {}).get(i)))
+    return out
 
 
 def horizon_text(years: float) -> str:
