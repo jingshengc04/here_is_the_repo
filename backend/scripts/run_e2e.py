@@ -108,8 +108,10 @@ async def amain(args) -> int:
               + "".join(f"\n   - {x}" for x in rd["verification"]["changesRequested"]))
     print("candidates:", ", ".join(f"{h['symbol']}{'*' if h.get('isUserRequested') else ''}"
                                   for sl in rep["finalAllocation"]["slices"] for h in sl["holdings"]), "(* = user requested)")
+    print("verdict:", "APPROVED" if rep["rounds"][-1]["verification"]["isApproved"] else "NOT APPROVED")
+    print("summary:", rep["summary"])
     print("interpretations:", [n for n in (rep.get("preferenceNotes") or [])][:6])
-    print("preference notes:", rep.get("preferenceNotes") or [])
+    print("preference notes:"); [print("  -", n) for n in rep.get("preferenceNotes") or []]
     print("final weights:")
     for s in rep["finalAllocation"]["slices"]:
         print(f"  {s['assetClass']} {s['weightPct']}%: " + ", ".join(f"{h['symbol']} {h['weightPct']}" for h in s["holdings"]))
@@ -128,7 +130,7 @@ async def amain(args) -> int:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--amount", type=float, default=10000)
-    ap.add_argument("--horizon", type=int, default=2)
+    ap.add_argument("--horizon", type=float, default=2)
     ap.add_argument("--risk", default="MODERATE", choices=["CONSERVATIVE", "MODERATE", "AGGRESSIVE"])
     ap.add_argument("--theme", default="AI infrastructure")
     ap.add_argument("--must-include", default="")

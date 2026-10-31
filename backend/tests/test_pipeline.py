@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import agents, pipeline
-from app.models import Candidate, Finding, IntakeInput, Report
+from app.models import Candidate, Finding, IntakeInput, Report, ResolvedPreferences
 
 INTAKE = IntakeInput(amountUsd=10000, horizonYears=2, riskTolerance="MODERATE", theme="AI")
 ROUNDS = json.loads(pipeline.FIXTURE.read_text())["report"]["rounds"]
@@ -93,7 +93,7 @@ def test_preference_notes_from_decide_plus_discovery_notes(fakes, monkeypatch):
         return [Candidate(symbol="NVDA", name="Nvidia", assetClass="STOCKS", isUserRequested=True)], []
 
     monkeypatch.setattr(agents, "discovery", discovery)
-    sys.modules["app.decide"].preference_notes = lambda intake, rounds: ["Honoured MEME style"]
+    sys.modules["app.decide"].preference_notes = lambda intake, rounds, rp=None: ["Honoured MEME style"]
     report, _ = go()
     assert report.preferenceNotes == ["Honoured MEME style", "Requested ZZZ could not be resolved"]
     assert fakes["cands"][0].isUserRequested is True
@@ -129,7 +129,12 @@ def test_resolver_runs_once_prefs_flow_to_agents_and_decide(fakes, monkeypatch):
         seen["decide_prefs"] = prefs
         return ROUNDS
     sys.modules["app.decide"].decide = decide
-    sys.modules["app.decide"].preference_notes = lambda intake, rounds: ["decide note"]
+    got = {}
+
+    def pnotes(intake, rounds, rp=None):
+        got["rp"] = rp
+        return ["decide note", "Understood: 'no tech' -> excluding sector Technology", "Technology excluded as requested (0% target)"]
+    sys.modules["app.decide"].preference_notes = pnotes
 
     events = []
 
@@ -139,7 +144,8 @@ def test_resolver_runs_once_prefs_flow_to_agents_and_decide(fakes, monkeypatch):
     report = asyncio.run(pipeline.run_pipeline("run_x", intake, emit))
     assert calls == [1] and seen["discovery_rp"] is rp and seen["decide_prefs"] is rp
     assert "my note" in seen["news_notes"] and "Technology" in seen["news_notes"]
-    assert report.preferenceNotes[:2] == ["'no tech' -> excluding sector Technology", "decide note"]
+    assert got["rp"] is rp   # the wiring bug: decide.preference_notes must receive the resolved preferences
+    assert report.preferenceNotes[:2] == ["'no tech' -> excluding sector Technology", "decide note"]  # restatements dropped
     prog = [e for e in events if e["type"] == "agent.progress" and "Understanding your preferences" in e["message"]]
     assert prog and prog[0]["agent"] == "DISCOVERY" and events[0]["type"] == "run.started" and events.index(prog[0]) == 1
 
@@ -152,3 +158,74 @@ def test_resolver_failure_never_fails_the_run_but_is_disclosed(fakes, monkeypatc
     monkeypatch.setattr(preferences, "resolve", boom)
     report, _ = go()
     assert report.preferenceNotes and "not applied" in report.preferenceNotes[0]
+
+
+
+# ---------------- Wave 7A ----------------
+from app.models import Check, Round as RoundModel, Verification
+
+
+def test_dedupe_is_ordered_case_insensitive_and_drops_restatements():
+    interps = ["'gold' → excluding asset class GOLD"]
+    out = pipeline.dedupe_notes(interps, ["Gold excluded as requested (0% target)", "Understood: 'GOLD' → excluding asset class gold",
+                                          "NVDA included at 10% as requested", "nvda included at 10% as requested", "Bonds 5% added as ballast"],
+                                ["bonds 5% added as ballast", "Requested ZZZ could not be resolved"])
+    assert out == ["'gold' → excluding asset class GOLD", "NVDA included at 10% as requested", "Bonds 5% added as ballast",
+                   "Requested ZZZ could not be resolved"]
+
+
+def _failed_round(checks, ci=(-0.2, 1.1), dd=-46.0):
+    r = RoundModel.model_validate(ROUNDS[-1])
+    r.verification = Verification(isApproved=False, checks=checks, changesRequested=[])
+    r.backtest.sharpeCi = type(r.backtest.sharpeCi)(lower=ci[0], upper=ci[1], probPositive=0.6) if ci else None
+    r.backtest.metrics["PORTFOLIO"].maxDrawdownPct = dd
+    return r
+
+
+def test_not_approved_notes_are_plain_english_per_failed_check():
+    rp = ResolvedPreferences(interpretations=["'bio stocks' → only stocks in industry Biotechnology"])
+    checks = [Check(name="Sharpe 95% CI above zero", isPassed=False, detail="CI lower -0.2"),
+              Check(name="Max drawdown within MODERATE limit (-35%)", isPassed=False, detail="x"),
+              Check(name="User preferences respected", isPassed=False, detail="KO violates your 'only bio' rule"),
+              Check(name="Weights sum to 100%", isPassed=False, detail="Holdings sum to 76.0%"),
+              Check(name="Fine", isPassed=True, detail="ok")]
+    notes = pipeline.not_approved_notes(INTAKE, [_failed_round(checks)], rp)
+    assert len(notes) == 4
+    assert notes[0].startswith("Your chosen universe (only stocks in industry Biotechnology) hasn't shown") and "-0.2 to 1.1" in notes[0]
+    assert "fell 46% at its worst" in notes[1] and "35%" in notes[1] and "moderate profile" in notes[1]
+    assert notes[2] == "KO violates your 'only bio' rule" and notes[3] == "Weights sum to 100%: Holdings sum to 76.0%"
+    approved = RoundModel.model_validate(ROUNDS[-1])
+    assert approved.verification.isApproved and pipeline.not_approved_notes(INTAKE, [approved], rp) == []
+
+
+def test_not_approved_run_puts_reasons_first_and_into_summary_input(fakes, monkeypatch):
+    seen = {}
+    bad = _failed_round([Check(name="Sharpe 95% CI above zero", isPassed=False, detail="d")]).model_dump()
+
+    async def decide(intake, cands, findings, emit, prefs=None):
+        return [bad]
+
+    async def summarize(intake, rounds, findings):
+        seen["notes"] = intake.preferences.notes
+        return "summary"
+    sys.modules["app.decide"].decide = decide
+    sys.modules["app.decide"].summarize = summarize
+    sys.modules["app.decide"].preference_notes = lambda intake, rounds, rp=None: ["decide note"]
+    report, _ = go()
+    assert "statistically reliable" in report.preferenceNotes[0] and report.preferenceNotes[1] == "decide note"
+    assert "Not approved because:" in seen["notes"]
+
+
+def test_short_horizon_reaches_research_prompts(fakes, monkeypatch):
+    seen = {}
+
+    async def news(syms, ids, on_step=None, notes=None, **kw):
+        seen["notes"] = notes
+        return []
+    monkeypatch.setattr(agents, "news", news)
+    short = INTAKE.model_copy(update={"horizonYears": 0.25})
+
+    async def emit(ev):
+        pass
+    asyncio.run(pipeline.run_pipeline("r", short, emit))
+    assert "3-month horizon" in seen["notes"] and "capital preservation" in seen["notes"]

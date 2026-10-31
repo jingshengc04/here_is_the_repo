@@ -411,3 +411,13 @@ def test_discovery_prompt_carries_resolved_preferences(monkeypatch):
     run(agents.discovery(INTAKE.model_copy(update={"preferences": Preferences(onlyInclude=["bio"])}), count(1), rp=rp))
     p = prompts[0]
     assert "Biotechnology" in p and "China" in p and "NO GOLD" in p and "at least 5" in p
+
+
+def test_horizon_rendering_and_short_horizon_hint(monkeypatch):
+    assert [agents.horizon_text(h) for h in (0.25, 0.5, 1, 2, 1.5)] == ["3-month", "6-month", "1-year", "2-year", "1.5-year"]
+    _bond_prices(monkeypatch)
+    prompts = _capture(monkeypatch, agents.DiscoveryOut(picks=[]))
+    run(agents.discovery(INTAKE.model_copy(update={"horizonYears": 0.25}), count(1)))
+    run(agents.discovery(INTAKE.model_copy(update={"horizonYears": 2}), count(1)))
+    assert "3-month horizon" in prompts[0] and "capital preservation" in prompts[0]
+    assert "2-year horizon" in prompts[1] and "capital preservation" not in prompts[1]

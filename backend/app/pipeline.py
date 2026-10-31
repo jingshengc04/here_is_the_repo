@@ -4,6 +4,7 @@ This is the FAKE: it replays app/fixtures/report.example.json as a realistic eve
 """
 import asyncio
 import importlib
+import re
 import inspect
 import json
 import os
@@ -14,8 +15,8 @@ from pathlib import Path
 
 from itertools import count
 
-from . import agents, preferences
-from .models import Candidate, IntakeInput, Report, ResolvedPreferences
+from . import agents, config, preferences
+from .models import Candidate, IntakeInput, Preferences, Report, ResolvedPreferences, Round
 
 Emit = Callable[[dict], Awaitable[None]]
 FIXTURE = Path(__file__).parent / "fixtures" / "report.example.json"
@@ -112,7 +113,8 @@ async def research(intake: IntakeInput, emit: Emit, notes_out: list[str] | None 
     cands, findings = await _run_agent(emit, "DISCOVERY", FLASH, lambda cb: agents.discovery(intake, ids, cb, notes_out=notes_out, rp=rp))
     # every research agent sees the investor's notes AND what their words resolved to (so e.g. 'ethical' gets relevant bear cases)
     notes = " | ".join(x for x in (intake.preferences.notes if intake.preferences else None,
-                                   preferences.prompt_text(rp) if rp else None) if x) or None
+                                   preferences.prompt_text(rp) if rp else None,
+                                   agents.horizon_context(intake.horizonYears)) if x) or None
     stocks = [c for c in cands if c.assetClass == "STOCKS"]
     syms = [c.symbol for c in cands]
 
@@ -145,6 +147,63 @@ async def research(intake: IntakeInput, emit: Emit, notes_out: list[str] | None 
     return cands, findings
 
 
+_FORMAT_WORDS = {"excluded", "requested", "target", "included", "the", "and", "not", "could", "for", "with", "held", "met",
+                 "from", "was", "were", "has", "have", "are", "understood"}
+
+
+def _restates(note: str, interpretations: list[str]) -> bool:
+    """True if `note` only repeats an interpretation (same wording, or its content words are a subset and it adds no number)."""
+    norm = lambda t: re.sub(r"^understood:\s*", "", t.strip().lower())  # noqa: E731
+    if norm(note) in {norm(i) for i in interpretations}:
+        return True
+    if [n for n in re.findall(r"\d+(?:\.\d+)?", note) if float(n) != 0]:
+        return False  # numbers (weights, drawdowns) carry new information
+    words = set(re.findall(r"[a-z]{3,}", note.lower())) - _FORMAT_WORDS
+    return bool(words) and any(words <= set(re.findall(r"[a-z]{3,}", i.lower())) for i in interpretations)
+
+
+def dedupe_notes(interpretations: list[str], *groups: list[str]) -> list[str]:
+    """Interpretations first, then the other groups in order; drop restatements and case-insensitive duplicates."""
+    out, seen = [], set()
+    for group_i, notes in enumerate([interpretations, *groups]):
+        for n in notes:
+            key = n.strip().lower()
+            if not key or key in seen or (group_i and _restates(n, interpretations)):
+                continue
+            seen.add(key)
+            out.append(n)
+    return out
+
+
+def not_approved_notes(intake: IntakeInput, rounds: list[Round], rp: ResolvedPreferences) -> list[str]:
+    """Plain-English reason per failed check of the final round (empty when approved). Generic: keyed on check wording only."""
+    last = rounds[-1]
+    if last.verification.isApproved:
+        return []
+    limit = abs(config.DRAWDOWN_LIMITS[intake.riskTolerance])
+    risk = intake.riskTolerance.lower()
+    short = [re.split(r"→|->", i)[-1].strip() for i in rp.interpretations][:2]
+    universe = "your chosen universe" + (f" ({'; '.join(short)})" if short else f" ({intake.theme})" if intake.theme else "")
+    out = []
+    for c in last.verification.checks:
+        if c.isPassed:
+            continue
+        name = c.name.lower()
+        ci = last.backtest.sharpeCi
+        if "sharpe" in name and ci:
+            out.append(f"{universe[0].upper() + universe[1:]} hasn't shown a statistically reliable positive risk-adjusted return over the "
+                       f"last 5 years (Sharpe 95% CI {ci.lower:g} to {ci.upper:g}), so this portfolio is not approved. Consider broadening it.")
+        elif "drawdown" in name:
+            dd = abs(last.backtest.metrics["PORTFOLIO"].maxDrawdownPct)
+            out.append(f"Even after rebalancing, this mix fell {dd:g}% at its worst in the last 5 years, beyond the {limit:g}% your "
+                       f"{risk} profile allows. Consider a higher risk level or fewer volatile assets.")
+        elif "preference" in name:
+            out.append(c.detail)
+        else:
+            out.append(f"{c.name}: {c.detail}")
+    return out
+
+
 async def run_real(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
     # import_module (not `from . import`) so it honours sys.modules patches even after the real module was imported
     decide = importlib.import_module("app.decide")
@@ -161,11 +220,18 @@ async def run_real(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
     cands, findings = await research(intake, emit, pref_notes, rp)
     kw = {"prefs": rp} if "prefs" in inspect.signature(decide.decide).parameters else {}
     rounds = await decide.decide(intake, cands, findings, emit, **kw)
-    summary = await decide.summarize(intake, rounds, findings)
+    rounds_m = [r if isinstance(r, Round) else Round.model_validate(r) for r in rounds]
+    why_not = not_approved_notes(intake, rounds_m, rp)
+    s_intake = intake
+    if why_not:  # decide.summarize has no slot for this, so ride along in the intake copy it dumps into its prompt
+        pr = intake.preferences or Preferences()
+        extra = "Not approved because: " + " ".join(why_not)
+        s_intake = intake.model_copy(update={"preferences": pr.model_copy(update={"notes": f"{pr.notes or ''} {extra}".strip()})})
+    summary = await decide.summarize(s_intake, rounds, findings)
     notes_fn = getattr(decide, "preference_notes", None)
-    extra = notes_fn(intake, rounds) if notes_fn else []
+    extra = notes_fn(intake, rounds, rp) if notes_fn else []
     extra = await extra if inspect.isawaitable(extra) else extra or []
-    pref_notes = [*rp.interpretations, *extra, *pref_notes]  # interpretations first, then decide's, then Discovery's
+    pref_notes = [*why_not, *dedupe_notes(rp.interpretations, extra, pref_notes)]  # failures first, then understood, decide's, Discovery's
     rounds = [r if isinstance(r, dict) else r.model_dump() for r in rounds]
     return Report.model_validate({
         "runId": run_id, "generatedAt": datetime.now(timezone.utc).isoformat(), "intake": intake.model_dump(),
