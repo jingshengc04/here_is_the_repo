@@ -49,7 +49,7 @@ class VerifierOut(BaseModel):
 
 
 ORCH_PROMPT = """You are a senior cross-asset allocator building ONE portfolio from the research below.
-Risk tolerance: {risk}. Horizon: {years} years. Amount: ${amount:,.0f}. Theme: {theme}.
+Risk tolerance: {risk}. Horizon: {years}. Amount: ${amount:,.0f}. Theme: {theme}.
 
 HARD CONSTRAINTS (the Verifier rejects the portfolio if any is violated):
 - Holding weights are % of the whole portfolio and sum to exactly 100.
@@ -76,7 +76,7 @@ Findings (id | symbol | sentiment | numbersVerified | claim):
 {findings}
 
 Risk-parity baseline weights (%): {baseline}
-{prefs}{feedback}"""
+{short}{prefs}{feedback}"""
 
 PREFS_PROMPT = """
 User preferences (verbatim): {prefs}
@@ -103,6 +103,17 @@ change, the direction and a target, and quoting the number that failed
 
 
 # ---------- helpers ----------
+SHORT_HORIZON = """
+SHORT HORIZON ({years}): favour liquidity and capital preservation, because a deep drawdown may not recover
+before the money is needed. Lean on the short-duration bond and T-bill candidates supplied, and keep crypto
+small unless the user explicitly targets it. (Guidance only; the hard checks above are unchanged.)
+"""
+
+
+def horizon_text(years: float) -> str:
+    """0.25 -> '3-month', 2 -> '2-year'."""
+    return f"{round(years * 12)}-month" if years < 1 else f"{round(years):g}-year"
+
 def normalise(raw: list[float]) -> list[float]:
     """Largest-remainder rounding to 0.1 so the result sums to exactly 100.0."""
     total = sum(raw)
@@ -410,6 +421,7 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
     base_txt = ", ".join(f"{s} {w * 100:.1f}" for s, w in baseline.items())
 
     prefs_txt = PREFS_PROMPT.format(prefs=prefs.model_dump_json(), interp=prefs.interpretations or "none") if prefs else ""
+    short_txt = SHORT_HORIZON.format(years=horizon_text(intake.horizonYears)) if intake.horizonYears <= 1 else ""
     rounds: list[Round] = []
     feedback = ""
     for n in range(1, config.MAX_ROUNDS + 1):
@@ -417,10 +429,10 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         t0 = time.perf_counter()
         await _emit(emit, {"type": "agent.started", "agent": "ORCHESTRATOR", "model": config.MODEL_ARGON,
                            "task": f"Build allocation (round {n})"})
-        prompt = ORCH_PROMPT.format(risk=risk, years=intake.horizonYears, amount=intake.amountUsd,
+        prompt = ORCH_PROMPT.format(risk=risk, years=horizon_text(intake.horizonYears), amount=intake.amountUsd,
                                     theme=intake.theme or "none", dd=config.DRAWDOWN_LIMITS[risk],
                                     maxh=config.MAX_HOLDING_PCT, bonds=BOND_RANGE[risk], cands=cand_txt, findings=find_txt or "(none)",
-                                    baseline=base_txt, prefs=prefs_txt, feedback=feedback)
+                                    baseline=base_txt, short=short_txt, prefs=prefs_txt, feedback=feedback)
         res = await _ask(model=config.MODEL_ARGON, input=prompt, schema=OrchestratorOut, agent="ORCHESTRATOR",
                          **_gen("medium"))
         alloc = _build_allocation(res.data, cands, findings, {s: w * 100 for s, w in baseline.items()},
@@ -545,7 +557,7 @@ async def summarize(intake: IntakeInput, rounds: list[Round], findings: list[Fin
         "Write a 3-5 sentence executive summary (markdown ok, no headings) of this portfolio for the investor. "
         "Mention the main positions, backtested return/drawdown vs SPY, and whether the Verifier approved it "
         "(and if round 1 was rejected, what changed). Be honest about risks; no financial-advice promises.\n"
-        f"Intake: {intake.model_dump()}\nHoldings: {', '.join(pos)}\n"
+        f"Horizon: {horizon_text(intake.horizonYears)}\nIntake: {intake.model_dump()}\nHoldings: {', '.join(pos)}\n"
         f"Portfolio: {m.model_dump()}\nSPY: {spy.model_dump()}\n"
         f"Rounds: {[(r.round, r.verification.isApproved, r.verification.changesRequested) for r in rounds]}\n"
         f"Findings: {len(findings)} collected")
