@@ -119,6 +119,7 @@ Map EVERY phrase onto Yahoo Finance's taxonomy, whatever it is (never refuse or 
 - countries: Yahoo country names (e.g. "China", "Germany"). A region ("European") means a list of its countries.
 - assetClasses: STOCKS, CRYPTO, GOLD, BONDS. symbols: exact tickers (stocks like NVDA, crypto like DOGE-USD).
 - keywords: last resort only, substring of a company name.
+In `only`, never add assetClasses STOCKS next to sectors/industries/countries (it is implied; adding it would let every stock through).
 Fields: mustInclude = tickers the investor insists on. only = restrict the universe to this (e.g. "only biotech" -> industries ["Biotechnology"]). exclude = never include (e.g. "no tech" -> sectors ["Technology"]; "ethical" -> industries like Tobacco, Aerospace & Defense, Oil & Gas E&P, Oil & Gas Integrated, Thermal Coal; "no gold" -> assetClasses ["GOLD"]). prefer = soft preference (styles or likes). classTargets = asset-class percentages, with pct 0 for a class the investor does not want at all.
 interpretations: ONE short line per investor phrase, e.g. "'bio stocks' -> only stocks in industry Biotechnology", "'no tech' -> excluding sector Technology".
 Only encode what the investor actually said. Leave everything else empty."""
@@ -155,6 +156,13 @@ async def resolve(intake: IntakeInput) -> ResolvedPreferences:
 
     by_lower = {x.lower(): x for x in SECTORS}
 
+    async def clean_only(f: Filter) -> Filter:
+        # `only` + assetClasses STOCKS alongside stock-level fields would make every stock match (OR semantics): redundant, drop it
+        stock_terms = f.sectors or f.industries or f.countries or f.keywords or f.symbols
+        if stock_terms and "STOCKS" in f.assetClasses:
+            f = f.model_copy(update={"assetClasses": [c for c in f.assetClasses if c != "STOCKS"]})
+        return await clean(f)
+
     async def clean(f: Filter) -> Filter:
         keep = [by_lower[x.lower()] for x in f.sectors if x.lower() in by_lower]
         notes.extend(f"Ignored unknown sector '{x}'." for x in f.sectors if x.lower() not in by_lower)
@@ -163,5 +171,5 @@ async def resolve(intake: IntakeInput) -> ResolvedPreferences:
     must = await valid([*out.mustInclude, *(pr.mustInclude if pr else [])])
     targets = {t.assetClass: t.pct for t in out.classTargets}
     targets.update(pr.assetClassTargets or {})  # the user's own numbers are authoritative
-    return ResolvedPreferences(mustInclude=must, prefer=await clean(out.prefer), only=await clean(out.only),
+    return ResolvedPreferences(mustInclude=must, prefer=await clean(out.prefer), only=await clean_only(out.only),
                                exclude=await clean(out.exclude), classTargets=targets, interpretations=notes)

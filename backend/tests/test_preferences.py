@@ -105,3 +105,12 @@ def test_describe_lists_only_non_empty_fields():
     assert preferences.describe(Filter()) == ""
     d = preferences.describe(Filter(industries=["Biotechnology"], countries=["China"]))
     assert "Biotechnology" in d and "China" in d and "sector" not in d.lower()
+
+
+def test_only_filter_drops_redundant_stocks_class(monkeypatch):
+    out = preferences.ResolveOut(only=Filter(industries=["Biotechnology"], assetClasses=["STOCKS"]))
+    _fake_ask(monkeypatch, out)
+    rp = asyncio.run(preferences.resolve(_intake(onlyInclude=["bio stocks"])))
+    assert rp.only.assetClasses == [] and rp.only.industries == ["Biotechnology"]
+    P_KO = {"symbol": "KO", "assetClass": "STOCKS", "sector": "consumer defensive", "industry": "beverages", "country": "", "longName": ""}
+    assert not allowed("KO", rp, P_KO)[0]   # with STOCKS left in `only`, KO would have slipped through
