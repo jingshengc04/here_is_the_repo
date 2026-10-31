@@ -330,3 +330,61 @@ def test_drawdown_failure_from_crypto_target_is_named_in_changes(fake):
     rounds = asyncio.run(decide.decide(intake, CANDS, FINDINGS, lambda e: None))
     assert any("Your 50% CRYPTO target exceeds what a Moderate profile allows; reduce to ~" in c
                for c in rounds[0].verification.changesRequested)
+
+
+# ---------- BONDS ----------
+BOND_CANDS = CANDS + [Candidate(symbol="SHY", name="Short Treasuries", assetClass="BONDS"),
+                      Candidate(symbol="TIP", name="TIPS", assetClass="BONDS")]
+
+
+def test_four_class_allocation_order_and_exact_sum():
+    cands = {c.symbol: c for c in BOND_CANDS}
+    out = _out({"GLD": 7, "BTC-USD": 11, "SHY": 23, "TIP": 17, "NVDA": 13, "MSFT": 29})
+    a = decide._build_allocation(out, cands, FINDINGS, {}, 10000, None)
+    assert [s.assetClass for s in a.slices] == ["STOCKS", "BONDS", "CRYPTO", "GOLD"]
+    assert round(sum(h.weightPct for s in a.slices for h in s.holdings), 1) == 100.0
+    assert max(h.weightPct for s in a.slices for h in s.holdings) <= 25.0
+
+
+def test_prompt_states_bond_ranges_per_risk(fake):
+    run()
+    p = fake["orch_inputs"][0]
+    assert "BONDS" in p and "10-30%" in p and "short-duration" in p.lower() and "2022" in p
+
+
+def test_bonds_underweight_not_explained_by_drawdown():
+    prefs = Preferences(assetClassTargets={"BONDS": 40})
+    cands = {c.symbol: c for c in BOND_CANDS}
+    a = decide._build_allocation(_out({"NVDA": 25, "MSFT": 25, "AAPL": 20, "SHY": 10, "GLD": 20}), cands, FINDINGS, {}, 1e4, prefs)
+    assert not decide._pref_check(prefs, a, cands, -34.0, -35.0).isPassed  # near the limit, but bonds only help
+
+
+def test_notes_mention_bonds(fake, monkeypatch):
+    cl = closes()
+    cl["SHY"] = 100 * np.cumprod(1 + np.random.default_rng(5).normal(.0005, .002, len(cl)))
+    cl["TIP"] = 100 * np.cumprod(1 + np.random.default_rng(6).normal(.0008, .004, len(cl)))
+    monkeypatch.setattr(decide.data, "prices", lambda syms, years=5: (cl[[s for s in syms if s in cl]], []))
+    intake = INTAKE.model_copy(update={"preferences": Preferences(assetClassTargets={"BONDS": 20})})
+    state = fake
+    orig = decide.llm.ask
+
+    async def ask(**kw):
+        if kw.get("schema") is decide.OrchestratorOut:
+            w = {"NVDA": 15, "MSFT": 15, "AAPL": 15, "SHY": 20, "TIP": 15, "GLD": 20}
+            data = decide.OrchestratorOut.model_validate({"assetClasses": [], "holdings": [
+                {"symbol": s, "weightPct": p, "rationale": "r", "findingIds": []} for s, p in w.items()]})
+            return llm.AskResult(data, "", [], "m", 1, [])
+        return await orig(**kw)
+
+    monkeypatch.setattr(decide.llm, "ask", ask)
+    rounds = asyncio.run(decide.decide(intake, BOND_CANDS, FINDINGS, lambda e: None))
+    notes = decide.preference_notes(intake, rounds)
+    assert any(n.startswith("Bonds target 20% met at 35%") for n in notes) or any("Bonds" in n for n in notes), notes
+    assert any(n.startswith("Bonds 35%") and "SHY" in n and "drawdown within -35%" in n for n in notes), notes
+
+
+def test_crypto_cap_can_search_upward_toward_a_target():
+    cands = {c.symbol: c for c in CANDS}
+    w = {"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 5, "GLD": 25}
+    up = decide._crypto_cap(w, cands, closes(), -60.0, hi=40.0)
+    assert up and 5 < up[0] <= 40 and up[1] >= -60.0

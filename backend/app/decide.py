@@ -20,7 +20,9 @@ from .models import (Allocation, AssetClass, Backtest, Candidate, Check, Finding
 SANDBOX_TIMEOUT_S = 45
 SANDBOX_STYLE = " Write one short script; do not iterate or explain; print only the JSON."
 log = logging.getLogger("app.decide")
-ORDER = ["STOCKS", "CRYPTO", "GOLD"]
+ORDER = ["STOCKS", "BONDS", "CRYPTO", "GOLD"]
+RISKY = {"STOCKS", "CRYPTO"}  # only these can be capped by the drawdown limit; bonds/gold only help
+BOND_RANGE = {"CONSERVATIVE": "30-50%", "MODERATE": "10-30%", "AGGRESSIVE": "0-10%"}
 
 
 # ---------- LLM schemas ----------
@@ -54,7 +56,11 @@ HARD CONSTRAINTS (the Verifier rejects the portfolio if any is violated):
 - Max single holding: {maxh}% (no exceptions, gold included).
 - Effective number of positions (1 / sum of squared weights) >= 4: use at least 5 holdings, none dominant.
 - Backtested max drawdown no worse than {dd}% ({risk} limit); crypto is the main drawdown driver.
-- At least 1 holding in every asset class you use (STOCKS/CRYPTO/GOLD).
+- At least 1 holding in every asset class you use (STOCKS/BONDS/CRYPTO/GOLD).
+- Bonds are ballast. Typical BONDS weight for a {risk} profile: {bonds} (AGGRESSIVE: 0-10% unless the user
+  targets bonds). Short-duration treasuries (e.g. SHY) cushion drawdowns best; long bonds fell together with
+  stocks in 2022. The {maxh}% per-holding cap still applies, so 50% bonds needs at least 2 bond ETFs.
+  If the drawdown check fails, add short-duration bonds before cutting anything else.
 - Gold is a hedge: typically 5-20% (above 25% is never allowed).
 - Every non-gold holding needs a documented bear case (a NEGATIVE finding); never cite a finding whose
   numbersVerified is False.
@@ -197,7 +203,7 @@ def _pref_check(prefs: Preferences | None, alloc: Allocation, cands: dict[str, C
         a = cw.get(ac, 0.0)
         if abs(a - t) <= 5:
             ok.append(f"{ac} {a:g}% within 5pp of {t:g}% target")
-        elif a < t and near:
+        elif a < t and near and ac in RISKY:
             ok.append(f"{ac} capped at {a:g}% vs {t:g}% target by the drawdown limit "
                       f"({dd:.1f}% vs {limit:g}%)")
         else:
@@ -230,14 +236,18 @@ def preference_notes(intake: IntakeInput, rounds: list[Round]) -> list[str]:
             continue
         tried = next((r for r in rounds if _class_weights(r.allocation).get(ac, 0.0) > a
                       and r.backtest.metrics["PORTFOLIO"].maxDrawdownPct < limit), None)
-        if a < t:
+        if a < t and ac in RISKY:
             why = f"a higher {ac.lower()} weight breaks your {risk} {limit:g}% drawdown limit"
             if tried:
                 why += (f" (round {tried.round} tried {_class_weights(tried.allocation)[ac]:g}%: "
                         f"{tried.backtest.metrics['PORTFOLIO'].maxDrawdownPct:g}%)")
             notes.append(f"{label} target {t:g}% → {a:g}%: {why}")
         else:
-            notes.append(f"{label} target {t:g}% → {a:g}%: above target")
+            notes.append(f"{label} target {t:g}% → {a:g}%: " + ("above target" if a > t else "below target"))
+    bonds = [h for s in last.allocation.slices if s.assetClass == "BONDS" for h in s.holdings]
+    if bonds:
+        notes.append(f"Bonds {cw.get('BONDS', 0.0):g}% ({', '.join(h.symbol for h in bonds)}): added as ballast to "
+                     f"keep your {risk} drawdown within {limit:g}%")
     return notes
 
 
@@ -321,7 +331,7 @@ def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: lis
 
 
 def _crypto_cap(weights: dict[str, float], cands: dict[str, Candidate], closes: pd.DataFrame,
-                limit: float) -> tuple[float, float] | None:
+                limit: float, hi: float | None = None) -> tuple[float, float] | None:
     """Largest total CRYPTO % (crypto holdings scaled together, rest scaled up, cap applied) whose backtested
     max drawdown still meets `limit`. Deterministic bisection on the engine; None if even 0% crypto fails."""
     syms = list(weights)
@@ -339,7 +349,7 @@ def _crypto_cap(weights: dict[str, float], cands: dict[str, Candidate], closes: 
 
     if dd_at(0.0)[1] < limit:
         return None
-    lo, hi = 0.0, cur
+    lo, hi = 0.0, max(cur, hi or 0.0)
     for _ in range(12):
         mid = (lo + hi) / 2
         lo, hi = (mid, hi) if dd_at(mid)[1] >= limit else (lo, mid)
@@ -392,7 +402,7 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
                            "task": f"Build allocation (round {n})"})
         prompt = ORCH_PROMPT.format(risk=risk, years=intake.horizonYears, amount=intake.amountUsd,
                                     theme=intake.theme or "none", dd=config.DRAWDOWN_LIMITS[risk],
-                                    maxh=config.MAX_HOLDING_PCT, cands=cand_txt, findings=find_txt or "(none)",
+                                    maxh=config.MAX_HOLDING_PCT, bonds=BOND_RANGE[risk], cands=cand_txt, findings=find_txt or "(none)",
                                     baseline=base_txt, prefs=prefs_txt, feedback=feedback)
         res = await _ask(model=config.MODEL_ARGON, input=prompt, schema=OrchestratorOut, agent="ORCHESTRATOR",
                          **_gen("medium"))
@@ -440,12 +450,20 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
             await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER",
                                "message": f"{len(failed)} check(s) failed; drafting requested changes"})
             weights = {h.symbol: h.weightPct for s in alloc.slices for h in s.holdings}
-            cap = None
-            if not checks[0].isPassed:
-                cap = _crypto_cap(weights, cands, closes, config.DRAWDOWN_LIMITS[risk])
-            target_msg = ""
             t_cry = (prefs.assetClassTargets or {}).get("CRYPTO") if prefs else None
             cur_cry = _class_weights(alloc).get("CRYPTO", 0.0)
+            limit_dd = config.DRAWDOWN_LIMITS[risk]
+            aim_dd = limit_dd * 0.95  # aim 5% inside the limit so rounding/mix changes don't tip it over
+            cap, up_hint = None, ""
+            if not checks[0].isPassed:
+                cap = _crypto_cap(weights, cands, closes, aim_dd)
+            elif t_cry is not None and cur_cry < t_cry - 5:  # drawdown headroom: the target can be approached
+                up = _crypto_cap(weights, cands, closes, aim_dd, hi=t_cry)
+                if up and up[0] > cur_cry:
+                    up_hint = (f"Computed by the backtest engine: you have drawdown headroom. Total CRYPTO can go up "
+                               f"to about {up[0]}% (max drawdown ≈ {up[1]}%, limit {limit_dd:g}%) toward the user's "
+                               f"{t_cry:g}% target; move to about {up[0]}%, not beyond.\n")
+            target_msg = ""
             if cap and t_cry is not None and cur_cry > cap[0]:
                 target_msg = (f"Your {t_cry:g}% CRYPTO target exceeds what a {risk.title()} profile allows; "
                               f"reduce to ~{cap[0]:g}%.")
@@ -454,7 +472,7 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
                     model=config.MODEL_ARGON, schema=VerifierOut, agent="VERIFIER", **_gen("low"),
                     input=VERIFIER_PROMPT.format(failed="\n".join(f"- {c.name}: {c.detail}" for c in failed),
                                                  metrics=bt.metrics["PORTFOLIO"].model_dump(), weights=weights,
-                                                 extra=(f"User preferences: {prefs.model_dump_json(exclude_none=True)}\n"
+                                                 extra=up_hint + (f"User preferences: {prefs.model_dump_json(exclude_none=True)}\n"
                                                         "If the drawdown failure is caused by a user preference "
                                                         "(e.g. a class target), say so explicitly.\n") if prefs else ""))
                 changes = v.data.changesRequested
@@ -473,9 +491,9 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         if verification.isApproved:
             break
         m = bt.metrics["PORTFOLIO"]
-        hint = ""
+        hint = up_hint
         if cap:
-            hint = (f"Computed by the backtest engine: with total CRYPTO at or below {cap[0]}% (crypto holdings "
+            hint += (f"Computed by the backtest engine: with total CRYPTO at or below {cap[0]}% (crypto holdings "
                     f"scaled down together, the rest scaled up), max drawdown ≈ {cap[1]}%. Keep total "
                     f"CRYPTO at or below {cap[0]}%.\n")
         feedback = (
