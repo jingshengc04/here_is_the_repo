@@ -20,7 +20,9 @@ from .models import (Allocation, AssetClass, Backtest, Candidate, Check, Finding
 SANDBOX_TIMEOUT_S = 45
 SANDBOX_STYLE = " Write one short script; do not iterate or explain; print only the JSON."
 log = logging.getLogger("app.decide")
-ORDER = ["STOCKS", "CRYPTO", "GOLD"]
+ORDER = ["STOCKS", "BONDS", "CRYPTO", "GOLD"]
+RISKY = {"STOCKS", "CRYPTO"}  # only these can be capped by the drawdown limit; bonds/gold only help
+BOND_RANGE = {"CONSERVATIVE": "30-50%", "MODERATE": "10-30%", "AGGRESSIVE": "0-10%"}
 
 
 # ---------- LLM schemas ----------
@@ -54,7 +56,11 @@ HARD CONSTRAINTS (the Verifier rejects the portfolio if any is violated):
 - Max single holding: {maxh}% (no exceptions, gold included).
 - Effective number of positions (1 / sum of squared weights) >= 4: use at least 5 holdings, none dominant.
 - Backtested max drawdown no worse than {dd}% ({risk} limit); crypto is the main drawdown driver.
-- At least 1 holding in every asset class you use (STOCKS/CRYPTO/GOLD).
+- At least 1 holding in every asset class you use (STOCKS/BONDS/CRYPTO/GOLD).
+- Bonds are ballast. Typical BONDS weight for a {risk} profile: {bonds} (AGGRESSIVE: 0-10% unless the user
+  targets bonds). Short-duration treasuries (e.g. SHY) cushion drawdowns best; long bonds fell together with
+  stocks in 2022. The {maxh}% per-holding cap still applies, so 50% bonds needs at least 2 bond ETFs.
+  If the drawdown check fails, add short-duration bonds before cutting anything else.
 - Gold is a hedge: typically 5-20% (above 25% is never allowed).
 - Every non-gold holding needs a documented bear case (a NEGATIVE finding); never cite a finding whose
   numbersVerified is False.
@@ -197,7 +203,7 @@ def _pref_check(prefs: Preferences | None, alloc: Allocation, cands: dict[str, C
         a = cw.get(ac, 0.0)
         if abs(a - t) <= 5:
             ok.append(f"{ac} {a:g}% within 5pp of {t:g}% target")
-        elif a < t and near:
+        elif a < t and near and ac in RISKY:
             ok.append(f"{ac} capped at {a:g}% vs {t:g}% target by the drawdown limit "
                       f"({dd:.1f}% vs {limit:g}%)")
         else:
@@ -230,14 +236,18 @@ def preference_notes(intake: IntakeInput, rounds: list[Round]) -> list[str]:
             continue
         tried = next((r for r in rounds if _class_weights(r.allocation).get(ac, 0.0) > a
                       and r.backtest.metrics["PORTFOLIO"].maxDrawdownPct < limit), None)
-        if a < t:
+        if a < t and ac in RISKY:
             why = f"a higher {ac.lower()} weight breaks your {risk} {limit:g}% drawdown limit"
             if tried:
                 why += (f" (round {tried.round} tried {_class_weights(tried.allocation)[ac]:g}%: "
                         f"{tried.backtest.metrics['PORTFOLIO'].maxDrawdownPct:g}%)")
             notes.append(f"{label} target {t:g}% → {a:g}%: {why}")
         else:
-            notes.append(f"{label} target {t:g}% → {a:g}%: above target")
+            notes.append(f"{label} target {t:g}% → {a:g}%: " + ("above target" if a > t else "below target"))
+    bonds = [h for s in last.allocation.slices if s.assetClass == "BONDS" for h in s.holdings]
+    if bonds:
+        notes.append(f"Bonds {cw.get('BONDS', 0.0):g}% ({', '.join(h.symbol for h in bonds)}): added as ballast to "
+                     f"keep your {risk} drawdown within {limit:g}%")
     return notes
 
 
@@ -392,7 +402,7 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
                            "task": f"Build allocation (round {n})"})
         prompt = ORCH_PROMPT.format(risk=risk, years=intake.horizonYears, amount=intake.amountUsd,
                                     theme=intake.theme or "none", dd=config.DRAWDOWN_LIMITS[risk],
-                                    maxh=config.MAX_HOLDING_PCT, cands=cand_txt, findings=find_txt or "(none)",
+                                    maxh=config.MAX_HOLDING_PCT, bonds=BOND_RANGE[risk], cands=cand_txt, findings=find_txt or "(none)",
                                     baseline=base_txt, prefs=prefs_txt, feedback=feedback)
         res = await _ask(model=config.MODEL_ARGON, input=prompt, schema=OrchestratorOut, agent="ORCHESTRATOR",
                          **_gen("medium"))
