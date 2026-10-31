@@ -53,7 +53,11 @@ def _only_covers(only: Filter, ac: AssetClass) -> bool:
     """An `only` filter restricts the classes it talks about: STOCKS if it has stock fields, plus named classes."""
     stock_terms = only.sectors or only.industries or only.countries or only.keywords or \
         any(asset_class(s) == "STOCKS" for s in only.symbols)
+    # ponytail: "only <stocks>" also rules out crypto (speculative, not asked for); bonds/gold stay as
+    # explained ballast unless excluded. Crypto stays allowed if the user named a coin or the CRYPTO class.
+    crypto_named = "CRYPTO" in only.assetClasses or any(asset_class(s) == "CRYPTO" for s in only.symbols)
     return ac in only.assetClasses or (ac == "STOCKS" and bool(stock_terms)) or \
+        (ac == "CRYPTO" and bool(stock_terms) and not crypto_named) or \
         any(asset_class(s) == ac for s in only.symbols)
 
 

@@ -27,7 +27,13 @@ def test_no_tech():
 def test_only_bio_stocks_restricts_stocks_not_other_classes():
     rp = ResolvedPreferences(only=Filter(industries=["Biotechnology"]))
     assert ok("MRNA", rp) and not ok("NVDA", rp) and not ok("KO", rp)   # defensive ballast KO also blocked
-    assert ok("GLD", rp) and ok("BTC-USD", rp)                          # other classes untouched unless targeted 0
+    assert ok("GLD", rp)                                                # gold/bonds stay as explained ballast
+    assert not ok("BTC-USD", rp)                                        # "only bio stocks" != "plus Bitcoin"
+
+
+def test_only_with_named_coin_keeps_crypto():
+    rp = ResolvedPreferences(only=Filter(industries=["Biotechnology"], symbols=["BTC-USD"]))
+    assert ok("BTC-USD", rp) and ok("MRNA", rp) and not ok("NVDA", rp)
 
 
 def test_no_gold_via_class_target_zero_and_via_exclude():
