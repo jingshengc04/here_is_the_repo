@@ -26,7 +26,7 @@ INTAKE_SYSTEM_INSTRUCTION = """\
 You are a friendly, encouraging onboarding assistant for a portfolio-research demo.
 Your job is to collect 3 required fields and any personalisation preferences from the user to build their investment portfolio:
 1. amountUsd: Total amount to invest in USD (must be between 100 and 10,000,000).
-2. horizonYears: Investment time horizon in years (integer between 1 and 10 years).
+2. horizonYears: Investment time horizon in years, 0.25 to 10 in quarter-year steps (3 months = 0.25, 6 months = 0.5, 18 months = 1.5, 2 years = 2).
 3. riskTolerance: One of CONSERVATIVE, MODERATE, or AGGRESSIVE. Map plain language like "safe/steady/can't stomach crashes/preservation/fairly cautious" to CONSERVATIVE, "balanced/growth but careful" to MODERATE, and "high growth/crypto/moonshots/max returns" to AGGRESSIVE.
 Optional:
 4. theme: An investment theme or focus if mentioned (e.g., "AI infrastructure", "clean energy"), max 200 characters.
@@ -48,7 +48,7 @@ RULES:
 - Ambiguity: If an "only" phrase is ambiguous about other asset classes (e.g. "only bio stocks": does the user also want no crypto, gold or bonds?), ask ONE short clarifying question in `clarifyingQuestion` or reply: "Do you also want no crypto, gold, or bonds, or should those asset classes still be included?"
 - Merge across turns: never drop preferences gathered earlier.
 - EXECUTION GUARD: If the user asks to place, buy, or execute a trade (e.g., "buy NVDA now"), politely state that this tool researches and backtests portfolios but does not place trades or give financial advice, and continue the intake.
-- If the user provides a horizon outside 1 to 10 years (e.g. 15 years), explain that the research model supports horizons from 1 to 10 years, and ask them for a horizon within that range.
+- If the user provides a horizon outside 0.25 to 10 years (e.g. less than 3 months, or 15 years), explain that the shortest horizon we support is 3 months (up to 10 years), and ask them for a horizon within that range.
 """
 
 KNOWN_CRYPTO_MAP = {
@@ -212,7 +212,10 @@ class _PreferencesExtraction(BaseModel):
 class _IntakeExtraction(BaseModel):
     reply: str = Field(description="Assistant reply to the user, <= 2 sentences.")
     amountUsd: float | None = Field(default=None, description="Amount in USD, or null if unknown.")
-    horizonYears: int | None = Field(default=None, description="Horizon in years, 1-10, or null.")
+    horizonYears: float | None = Field(
+        default=None,
+        description="Horizon in years, 0.25 to 10 in quarter-year steps (0.25 = 3 months, 0.5 = 6 months, 1.5 = 18 months), or null.",
+    )
     riskTolerance: Literal["CONSERVATIVE", "MODERATE", "AGGRESSIVE"] | None = Field(
         default=None, description="Risk tolerance level, or null if unknown."
     )
@@ -385,7 +388,7 @@ def extract_explicit_preferences(text: str) -> dict:
     for m in re.finditer(r"\b(?:no|avoid|exclude|without|hate|dislike|don't like|do not like)\s+([a-zA-Z0-9_\-\s]{2,30})\b", text, re.I):
         phrase = m.group(1).strip()
         phrase = re.split(r"[,.;]|and|or|\bwith\b|\bfor\b|\bbut\b", phrase)[0].strip()
-        if phrase and phrase.lower() not in ("preferences", "preference", "thanks", "problem", "crashes", "loss"):
+        if phrase and phrase.lower() not in ("preferences", "preference", "other preferences", "other preference", "thanks", "problem", "crashes", "loss"):
             norm = normalize_symbol_or_entity(phrase, is_exclude=True)
             if norm not in pref["exclude"]:
                 pref["exclude"].append(norm)
@@ -524,6 +527,42 @@ def parse_explicit_amount(text: str) -> float | None:
     return None
 
 
+def parse_explicit_horizon(text: str) -> tuple[float | None, bool]:
+    """Parse horizon from text, supporting quarter-year steps (0.25 to 10).
+    Returns (horizonYears, is_out_of_range).
+    """
+    text_lower = text.lower()
+
+    # 1. Months / mo: '3 months', '6 mo', '18 months', '1 month'
+    m_mo = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:months?|mos?)\b", text_lower)
+    if m_mo:
+        months = float(m_mo.group(1))
+        years = round((months / 12.0) * 4.0) / 4.0
+        if years < 0.25 or years > 10.0:
+            return None, True
+        return years, False
+
+    # 2. Weeks / wks: '12 weeks'
+    m_wk = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:weeks?|wks?)\b", text_lower)
+    if m_wk:
+        weeks = float(m_wk.group(1))
+        years = round((weeks / 52.0) * 4.0) / 4.0
+        if years < 0.25 or years > 10.0:
+            return None, True
+        return years, False
+
+    # 3. Years / yrs: '2 years', '1.5 yrs', '15 years'
+    m_yr = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:years?|yrs?)\b", text_lower)
+    if m_yr:
+        val_y = float(m_yr.group(1))
+        years = round(val_y * 4.0) / 4.0
+        if years < 0.25 or years > 10.0:
+            return None, True
+        return years, False
+
+    return None, False
+
+
 async def intake_turn(req: IntakeTurnRequest) -> IntakeTurn:
     """Process one intake chat turn."""
     formatted_conversation = "\n".join(
@@ -579,23 +618,28 @@ Analyze the full conversation history. Extract the current known intake values a
     had_out_of_range_horizon = False
     for msg in reversed(req.messages):
         if msg.role == "user":
-            m_years = re.search(r"\b(\d+)\s*(?:years?|yrs?)\b", msg.content, re.IGNORECASE)
-            if m_years:
-                val_y = int(m_years.group(1))
-                if not (1 <= val_y <= 10):
-                    horizon = None
-                    had_out_of_range_horizon = True
-                elif horizon is None:
-                    horizon = val_y
+            parsed_h, out_of_range = parse_explicit_horizon(msg.content)
+            if out_of_range:
+                horizon = None
+                had_out_of_range_horizon = True
+                break
+            elif parsed_h is not None:
+                horizon = parsed_h
                 break
 
-    if horizon is not None and not (1 <= horizon <= 10):
-        horizon = None
-        had_out_of_range_horizon = True
+    if horizon is not None:
+        try:
+            horizon = round(float(horizon) * 4.0) / 4.0
+            if not (0.25 <= horizon <= 10.0):
+                horizon = None
+                had_out_of_range_horizon = True
+        except (ValueError, TypeError):
+            horizon = None
+            had_out_of_range_horizon = True
 
     if had_out_of_range_horizon:
-        if not ("horizon" in reply.lower() or "year" in reply.lower()):
-            reply = "We support investment horizons between 1 and 10 years. How many years (1–10) would you like to invest for?"
+        if not ("horizon" in reply.lower() or "year" in reply.lower() or "month" in reply.lower() or "shortest" in reply.lower()):
+            reply = "The shortest horizon we support is 3 months (up to 10 years). How long would you like to invest for?"
 
     if risk not in ("CONSERVATIVE", "MODERATE", "AGGRESSIVE"):
         risk = None

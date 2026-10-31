@@ -120,12 +120,12 @@ def test_intake_3_turn_conversation():
 
 
 def test_out_of_range_horizon_reset_to_null():
-    """Horizon of 15 is out of range (1-10); set to null and ask again."""
+    """Horizon of 15 is out of range (0.25-10); set to null and ask again."""
     async def _run():
         from app.intake import intake_turn
 
         req = IntakeTurnRequest(messages=[ChatMessage(role="user", content="I have 10k for 15 years")])
-        mock_data = IntakeDraft(amountUsd=10000.0, horizonYears=15, riskTolerance=None, theme=None)
+        mock_data = IntakeDraft(amountUsd=10000.0, horizonYears=15.0, riskTolerance=None, theme=None)
         mock_res = AskResult(
             data=mock_data,
             text="",
@@ -140,7 +140,57 @@ def test_out_of_range_horizon_reset_to_null():
             assert turn.intake.horizonYears is None
             assert turn.intake.amountUsd == 10000.0
             assert turn.isComplete is False
-            assert "horizon" in turn.reply.lower() or "year" in turn.reply.lower()
+            assert "horizon" in turn.reply.lower() or "year" in turn.reply.lower() or "month" in turn.reply.lower()
+
+    asyncio.run(_run())
+
+
+def test_horizon_quarter_year_steps():
+    """Test horizon parsing in quarter-year steps:
+    '3 months' -> 0.25
+    '18 months' -> 1.5
+    '1 month' -> null + question ('the shortest horizon we support is 3 months')
+    """
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction
+
+        # 1. '3 months' -> 0.25
+        req1 = IntakeTurnRequest(messages=[ChatMessage(role="user", content="I have 10k for 3 months")])
+        mock_data1 = _IntakeExtraction(
+            reply="Understood, 3 months (0.25 years). What is your risk tolerance?",
+            amountUsd=10000.0,
+            horizonYears=0.25,
+            riskTolerance=None,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data1, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn1 = await intake_turn(req1)
+            assert turn1.intake.horizonYears == 0.25
+
+        # 2. '18 months' -> 1.5
+        req2 = IntakeTurnRequest(messages=[ChatMessage(role="user", content="Investing 5k for 18 months, moderate")])
+        mock_data2 = _IntakeExtraction(
+            reply="Got 18 months (1.5 years).",
+            amountUsd=5000.0,
+            horizonYears=1.5,
+            riskTolerance="MODERATE",
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data2, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn2 = await intake_turn(req2)
+            assert turn2.intake.horizonYears == 1.5
+
+        # 3. '1 month' -> null + question ('the shortest horizon we support is 3 months')
+        req3 = IntakeTurnRequest(messages=[ChatMessage(role="user", content="I want to invest 10k for 1 month")])
+        mock_data3 = _IntakeExtraction(
+            reply="The shortest horizon we support is 3 months. How long between 3 months and 10 years would you like to invest?",
+            amountUsd=10000.0,
+            horizonYears=None,
+            riskTolerance=None,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data3, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn3 = await intake_turn(req3)
+            assert turn3.intake.horizonYears is None
+            assert turn3.isComplete is False
+            assert "shortest horizon we support is 3 months" in turn3.reply.lower()
 
     asyncio.run(_run())
 
