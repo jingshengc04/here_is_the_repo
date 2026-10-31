@@ -21,11 +21,13 @@ def client(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def cleanup_saved_runs():
+def isolated_runs_dir(tmp_path, monkeypatch):
+    """Tests write saved runs to a temp dir, never the real backend/data/runs."""
+    global RUNS_DATA_DIR
+    from app import replay
+    monkeypatch.setattr(replay, "DATA_RUNS_DIR", tmp_path / "runs")
+    RUNS_DATA_DIR = tmp_path / "runs"
     yield
-    if RUNS_DATA_DIR.exists():
-        import shutil
-        shutil.rmtree(RUNS_DATA_DIR, ignore_errors=True)
 
 
 
