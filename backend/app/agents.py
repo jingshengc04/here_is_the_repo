@@ -133,6 +133,18 @@ def _findings(raws, agent, ids: Iterator[int], res=None, verified=None) -> list[
                     numbersVerified=(verified or {}).get(i)) for i, r in enumerate(raws)]
 
 
+def horizon_text(years: float) -> str:
+    """0.25 -> '3-month', 2 -> '2-year', 1.5 -> '1.5-year' (a horizon under a year is read in months)."""
+    return f"{round(years * 12)}-month" if years < 1 else f"{years:g}-year"
+
+
+SHORT_HORIZON_HINT = "Short horizon: favour liquidity and capital preservation; a deep drawdown may not recover in time."
+
+
+def horizon_context(years: float) -> str:
+    return f"{horizon_text(years)} horizon." + (f" {SHORT_HORIZON_HINT}" if years <= 1 else "")
+
+
 def _context(notes: str | None = None) -> str:
     """Shared prompt preamble: today's date (searches kept stale years) + the investor's free-text notes, verbatim."""
     out = f"Today is {datetime.date.today().isoformat()}. Prefer sources from the last 90 days; date every figure."
@@ -247,8 +259,9 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
 
     prompt = (
         f"You are the Discovery analyst. {_context(notes)}\n"
-        f"Investor: ${intake.amountUsd:,.0f}, {intake.horizonYears}-year horizon, "
+        f"Investor: ${intake.amountUsd:,.0f}, {horizon_text(intake.horizonYears)} horizon, "
         f"{intake.riskTolerance} risk, theme: {intake.theme or 'none (broad diversified growth)'}.\n"
+        + (f"{SHORT_HORIZON_HINT}\n" if intake.horizonYears <= 1 else "")
         + (f"Resolved preferences (hard rules): {preferences.prompt_text(rp)}\n" if preferences.prompt_text(rp) else "")
         + f"Run 2-3 Google searches, then pick {count_txt('STOCKS', '4-6')} stocks (mix of leaders plus small/mid caps or suppliers) and "
         f"{count_txt('CRYPTO', '3-5' if 'MEME' in styles else '2-3')} cryptocurrencies suited to the theme and risk level. "
