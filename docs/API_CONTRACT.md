@@ -316,4 +316,8 @@ Screens (one page, top to bottom, replacing wireframes ① and ②):
 - **Backtest:** line chart of `equityCurve` (4 series) + metrics table; show `crossCheck.isMatch` as a "✓ Verified" badge.
 - **Stream:** native `EventSource`. Handle `onerror` by falling back to polling `GET /api/runs/{runId}` every 3 s.
 - **Mock mode:** with `NEXT_PUBLIC_USE_MOCK=true`, replay the fixture's `rounds` on a timer so the agent lanes, round-1 rejection and round-2 approval all animate. The demo has to work with the backend off.
+- **Retry buttons (frontend-only, no new endpoint):**
+  - On `run.failed`, a stream error or a 5xx, show **Try again**, which re-sends `POST /api/runs` with the same intake. On 429, wait 5 seconds and retry.
+  - On the results page, show **Run again** (same intake) and **Edit & run again** (back to the confirm card).
+  - The Orchestrator→Verifier redo inside a run is automatic (max 2 rounds). The buttons restart the whole run, research included.
 - All numbers arrive pre-rounded (1 decimal for %, 2 for sharpe). Don't recompute weights client-side.
