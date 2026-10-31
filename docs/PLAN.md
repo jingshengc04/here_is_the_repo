@@ -118,6 +118,12 @@ Deterministic checks plus Argon writing `changesRequested`, then round 2 if need
 - [ ] `run.completed.report` validates against `models.Report`.
 - Files: `agents.py`, `pipeline.py`
 
+**Task 13: Intake chat agent** · S
+`POST /api/intake/messages` is stateless: the whole history goes in, and an `IntakeTurn` comes back from one Flash call with a structured schema. Python validates the draft against `IntakeInput` and only sets `isComplete` when the required fields are valid.
+- [ ] A test with a scripted 3-turn conversation ("10k" → "2 years" → "moderate") ends with `isComplete` and `amountUsd == 10000`.
+- [ ] 21 messages → 422.
+- Files: `main.py` (route only), `agents.py` (`intake_turn`)
+
 ### Checkpoint C — end to end
 - [ ] A real run from the deployed frontend finishes in under about 3 minutes with 12 or fewer Gemini calls.
 - [ ] The round-1 rejection is visible in the UI.

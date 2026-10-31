@@ -20,6 +20,7 @@ streams their progress live → returns a **verified two-level portfolio**:
 
 | `AgentId`      | Model           | Job |
 |----------------|-----------------|-----|
+| `INTAKE`       | Gemini 3.8 Flash (`gemini-3.8-flash`) | Onboarding chat → fills `IntakeInput` (not part of a run, so no lane) |
 | `DISCOVERY`    | Gemini 3.8 Flash (`gemini-3.8-flash`) | Finds candidate stocks + crypto (Google Search grounding) |
 | `FINANCIALS`   | Gemini 3.8 Flash (`gemini-3.8-flash`) | Scores each stock 1–10 from real statements (code execution) |
 | `LANDSCAPE`    | Gemini 3.8 Flash (`gemini-3.8-flash`) | Competitors / market position (Search grounding) |
@@ -45,6 +46,31 @@ NEXT_PUBLIC_USE_MOCK=true                       # true until backend is live →
 
 Call `${process.env.NEXT_PUBLIC_BACKEND_URL}/api/...`. Don't go through a Next.js `rewrites()` proxy for
 the SSE stream, because proxies can buffer it and the agents' progress would arrive all at once.
+
+### `POST /api/intake/messages` — chat onboarding (Intake agent)
+
+**Stateless:** the frontend keeps the chat history and sends all of it each turn. Response `200`: `IntakeTurn`.
+One Gemini Flash call per turn, typically 2–4 turns.
+
+```http
+POST /api/intake/messages
+Content-Type: application/json
+
+{ "messages": [
+    { "role": "user", "content": "I have about 10k, want growth but can't stomach crypto crashes" }
+] }
+```
+```json
+{ "reply": "Got it: $10,000 with moderate risk. How long can you leave it invested, 1 year or more like 5?",
+  "intake": { "amountUsd": 10000, "horizonYears": null, "riskTolerance": "MODERATE", "theme": null },
+  "isComplete": false }
+```
+
+- Append `{role:"assistant", content: reply}` to the history and send the next user message.
+- When `isComplete === true`, every required field in `intake` is non-null. Show a **confirm card** with editable fields
+  and a **Run** button that sends `POST /api/runs` with that `IntakeInput`. Never auto-start a run.
+- Maximum 20 messages per request (`422` beyond that). Each `content` is at most 2,000 chars.
+- If this endpoint fails, show the plain form, which uses the same fields. The demo must not depend on the chat working.
 
 ### `POST /api/runs` — start a run
 
@@ -104,6 +130,20 @@ export interface IntakeInput {
   horizonYears: number;     // integer 1 – 10
   riskTolerance: RiskTolerance;
   theme?: string;           // optional focus, ≤ 200 chars, e.g. "AI infrastructure"
+}
+
+// ---------- Chat onboarding ----------
+export interface ChatMessage { role: "user" | "assistant"; content: string }
+export interface IntakeTurnRequest { messages: ChatMessage[] }   // ≤ 20, content ≤ 2000 chars
+export interface IntakeTurn {
+  reply: string;                     // assistant message to render, markdown allowed
+  intake: {                          // partially filled draft, null = not known yet
+    amountUsd: number | null;
+    horizonYears: number | null;
+    riskTolerance: RiskTolerance | null;
+    theme: string | null;
+  };
+  isComplete: boolean;               // true ⇒ amountUsd, horizonYears, riskTolerance non-null
 }
 
 // ---------- Run ----------
@@ -260,7 +300,7 @@ report page against it before the backend is live.
 ## UI notes for frontend agents
 
 Screens (one page, top to bottom, replacing wireframes ① and ②):
-1. **Intake**: amount (number), horizon (1–10 years), risk (3-way toggle: Conservative / Moderate / Aggressive), optional theme text, and a **Run** button. Show 422 `details` inline under each field.
+1. **Onboarding chat**: a chat with the Intake agent (`POST /api/intake/messages`). Its first message is hard-coded in the frontend: *"Hi! How much are you looking to invest, and what are you hoping for?"* When `isComplete`, show the **confirm card** (amount, horizon 1–10, risk toggle, theme; all editable) with a **Run** button. Show 422 `details` inline. If the chat endpoint errors, fall back to the same card as a plain form.
 2. **Agents at work**: 7 agent lanes that animate live from the stream.
 3. **Results**: the two-level pie, a holdings table (symbol, %, $, scores, rationale), the round-1 → round-2 diff, the backtest chart and metrics, findings with sources, and the disclaimer.
 
