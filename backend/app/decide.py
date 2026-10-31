@@ -17,6 +17,8 @@ from . import config, data, engine, llm
 from .models import (Allocation, AssetClass, Backtest, Candidate, Check, Finding, IntakeInput, Round,
                      Verification)
 
+SANDBOX_TIMEOUT_S = 45
+SANDBOX_STYLE = " Write one short script; do not iterate or explain; print only the JSON."
 log = logging.getLogger("app.decide")
 ORDER = ["STOCKS", "CRYPTO", "GOLD"]
 
@@ -143,21 +145,50 @@ def _build_allocation(out: OrchestratorOut, cands: dict[str, Candidate], finding
     return Allocation.model_validate({"slices": slices})
 
 
+def _find_json(blob: str) -> dict | None:
+    for m in reversed(re.findall(r"\{[^{}]*totalReturnPct[^{}]*\}", blob)):
+        for parse in (json.loads, ast.literal_eval):
+            try:
+                d = parse(m)
+                return {"totalReturnPct": float(d["totalReturnPct"]), "maxDrawdownPct": float(d["maxDrawdownPct"])}
+            except Exception:
+                pass
+    return None
+
+
 def _parse_sandbox(res: llm.AskResult) -> dict:
-    blobs = [res.text] + [str(s.get("result", "")) for s in res.steps]
-    for blob in blobs:
-        for m in reversed(re.findall(r"\{[^{}]*totalReturnPct[^{}]*\}", blob)):
-            for parse in (json.loads, ast.literal_eval):
-                try:
-                    d = parse(m)
-                    return {"totalReturnPct": float(d["totalReturnPct"]), "maxDrawdownPct": float(d["maxDrawdownPct"])}
-                except Exception:
-                    pass
+    """Trust executed-code output first; model prose only counts if code actually ran."""
+    ran = any(s.get("type") == "code_execution_call" or s.get("code") for s in res.steps)
+    for s in res.steps:
+        if s.get("type") == "code_execution_result" and (d := _find_json(str(s.get("result", "")))):
+            return d
+    if not ran:
+        raise ValueError("sandbox did not execute code")
+    if d := _find_json(res.text):
+        return d
     raise ValueError("no {totalReturnPct, maxDrawdownPct} JSON in sandbox output")
 
 
+def _sandbox_progress(emit, clock=time.monotonic):
+    """on_step callback: human messages, one per distinct message, at most one per second."""
+    last = {"msg": None, "t": -1e9}
+
+    async def on_step(step: dict) -> None:
+        typ = step.get("type")
+        msg = ("Sandbox: executing Python" if typ == "code_execution_call"
+               else "Sandbox: result received" if typ == "code_execution_result"
+               else "Sandbox: writing backtest code")
+        now = clock()
+        if msg == last["msg"] or now - last["t"] < 1.0:
+            return
+        last.update(msg=msg, t=now)
+        await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER", "message": msg})
+
+    return on_step
+
+
 def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: list[Finding],
-            risk: str) -> list[Check]:
+            risk: str, sandbox_note: str = "") -> list[Check]:
     hs = [h for s in alloc.slices for h in s.holdings]
     limit = config.DRAWDOWN_LIMITS[risk]
     dd = bt.metrics["PORTFOLIO"].maxDrawdownPct
@@ -179,7 +210,7 @@ def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: lis
           detail=f"Largest holding is {top.symbol} at {top.weightPct}%"),
         C(name="Sandbox cross-check matches", isPassed=cc.isMatch,
           detail=f"Sandbox return {cc.sandboxTotalReturnPct}% vs independent {cc.independentTotalReturnPct}%"
-                 + ("" if cc.isMatch else " (mismatch or sandbox unavailable)")),
+                 + ("" if cc.isMatch else f" ({sandbox_note or 'mismatch or sandbox unavailable'})")),
         C(name="Sharpe 95% CI above zero", isPassed=bool(ci and ci.lower > 0),
           detail=f"Sharpe CI lower bound {ci.lower}" if ci else "Sharpe CI unavailable"),
         C(name="Diversification (effective N >= 4)", isPassed=bool(en and en >= 4),
@@ -276,22 +307,33 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         await _emit(emit, {"type": "agent.started", "agent": "VERIFIER", "model": config.MODEL_ARGON,
                            "task": f"Backtest and verify (round {n})"})
 
-        async def on_step(step: dict) -> None:
-            await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER",
-                               "message": "Sandbox: running portfolio simulation" if step.get("code")
-                               else f"Sandbox step: {step.get('type')}"})
+        on_step = _sandbox_progress(emit)
+        note = ""
 
         async def sandbox(df: pd.DataFrame, w: dict) -> dict:
-            r = await _ask(model=config.MODEL_FLASH,
-                           input=[llm.text_part(engine.sandbox_prompt(w)), llm.csv_part(df)],
-                           tools=["code_execution"], agent="VERIFIER", on_step=on_step, **_gen("low"))
-            return _parse_sandbox(r)
+            nonlocal note
+            await on_step({"type": "writing"})
+            sig4 = df.apply(lambda col: col.map(lambda x: float(f"{x:.4g}")))  # cheaper prompt, same numbers to ~0.05%
+            try:
+                r = await asyncio.wait_for(
+                    _ask(model=config.MODEL_FLASH,
+                         input=[llm.text_part(engine.sandbox_prompt(w) + SANDBOX_STYLE), llm.csv_part(sig4)],
+                         tools=["code_execution"], agent="VERIFIER", on_step=on_step, **_gen("low")),
+                    SANDBOX_TIMEOUT_S)
+                return _parse_sandbox(r)
+            except asyncio.TimeoutError:
+                note = f"sandbox timed out after {SANDBOX_TIMEOUT_S:g}s; independent numbers shown"
+                await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER", "message": note.capitalize()})
+                raise
+            except Exception as e:
+                note = str(e) if isinstance(e, ValueError) else f"sandbox failed: {e!r}"
+                raise
 
         await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER", "message": "Running backtest in sandbox"})
         bt = await engine.run_backtest(alloc, closes, sandbox)
         await _emit(emit, {"type": "backtest.completed", "round": n, "backtest": bt.model_dump()})
 
-        checks = _checks(alloc, bt, closes, findings, risk)
+        checks = _checks(alloc, bt, closes, findings, risk, note)
         failed = [c for c in checks if not c.isPassed]
         changes: list[str] = []
         if failed:
