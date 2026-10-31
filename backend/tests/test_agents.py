@@ -491,7 +491,7 @@ def test_theme_still_a_requirement_without_only(monkeypatch):
 
 def test_thin_universe_adds_second_bond_and_notes_when_still_thin(monkeypatch):
     cands, notes, _, _ = _thin(monkeypatch, second=["NVDA"])               # extra pass finds nothing usable
-    assert [c.symbol for c in cands if c.assetClass == "BONDS"] == ["BIL", "SHY"]   # lowest drawdown first
+    assert [c.symbol for c in cands if c.assetClass == "BONDS"] == ["SHY", "BIL"]   # lowest drawdown first
     assert any("universe is thin" in n and "2 matching stock" in n for n in notes)
     assert len(cands) * 25 >= 100
 
