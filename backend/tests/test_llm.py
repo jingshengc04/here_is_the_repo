@@ -315,7 +315,7 @@ def test_on_step_callbacks_and_sources():
         assert "code_execution_result" in types
 
         search_step = next(s for s in fired_steps if s["type"] == "google_search_call")
-        assert search_step.get("query") == "top semiconductor stocks 2026"
+        assert search_step.get("query") == "Searching: top semiconductor stocks 2026"
 
         code_step = next(s for s in fired_steps if s["type"] == "code_execution_call")
         assert "print('running python')" in code_step.get("code")
@@ -324,3 +324,159 @@ def test_on_step_callbacks_and_sources():
         assert "https://example.com/search" in urls or "https://example.com/semis" in urls
 
     asyncio.run(_test())
+
+
+def test_source_deduplication_and_citations():
+    """An offline test with a fake model_output carrying 2 annotations (one duplicate URL) -> 1 source after dedup."""
+    from app.llm import ask, set_client
+    from app import llm
+
+    llm._BACKOFF_DELAYS = [0.001, 0.002, 0.004]
+
+    @dataclass
+    class URLCitation:
+        title: str
+        url: str
+        start_index: int
+        end_index: int
+        type: str = "url_citation"
+
+    @dataclass
+    class TextContent:
+        text: str
+        annotations: list
+
+    steps = [
+        FakeStep(
+            type="model_output",
+            content=[
+                TextContent(
+                    text="NVIDIA makes GPUs and systems.",
+                    annotations=[
+                        URLCitation(title="Nvidia Home", url="https://nvidia.com", start_index=0, end_index=15),
+                        URLCitation(title="Nvidia Products", url="https://nvidia.com", start_index=16, end_index=30),
+                    ],
+                )
+            ],
+        ),
+    ]
+
+    async def _test():
+        async def handler(kwargs):
+            return FakeInteraction(output_text="NVIDIA makes GPUs and systems.", steps=steps)
+
+        client = FakeClient(handler)
+        set_client(client)
+
+        res = await ask(
+            model="gemini-3.8-flash",
+            input="NVIDIA overview",
+            tools=("google_search",),
+            agent="DISCOVERY",
+        )
+
+        # Sources should be deduplicated to 1 item
+        assert len(res.sources) == 1
+        assert res.sources[0] == {"title": "Nvidia Home", "url": "https://nvidia.com"}
+
+        # Citations should preserve both distinct spans
+        assert hasattr(res, "citations")
+        assert len(res.citations) == 2
+        assert res.citations[0] == {
+            "title": "Nvidia Home",
+            "url": "https://nvidia.com",
+            "start": 0,
+            "end": 15,
+        }
+        assert res.citations[1] == {
+            "title": "Nvidia Products",
+            "url": "https://nvidia.com",
+            "start": 16,
+            "end": 30,
+        }
+
+    asyncio.run(_test())
+
+
+def test_search_with_schema_two_step_fallback():
+    """When google_search in tools and schema is set, make call without response_format first, then cheap schema conversion call."""
+    from app.llm import ask, set_client
+    from app import config, llm
+
+    llm._BACKOFF_DELAYS = [0.001, 0.002, 0.004]
+
+    @dataclass
+    class URLCitation:
+        title: str
+        url: str
+        start_index: int
+        end_index: int
+        type: str = "url_citation"
+
+    @dataclass
+    class TextContent:
+        text: str
+        annotations: list
+
+    grounded_steps = [
+        FakeStep(
+            type="google_search_call",
+            arguments={"queries": ["nvda news", "nvidia stock"]},
+        ),
+        FakeStep(
+            type="model_output",
+            content=[
+                TextContent(
+                    text="NVIDIA reports record revenue.",
+                    annotations=[
+                        URLCitation(title="Nvidia PR", url="https://nvidianews.nvidia.com", start_index=0, end_index=29)
+                    ],
+                )
+            ],
+        ),
+    ]
+
+    call_index = 0
+
+    async def _test():
+        nonlocal call_index
+
+        async def handler(kwargs):
+            nonlocal call_index
+            call_index += 1
+            if call_index == 1:
+                # First call: must have google_search and NO response_format
+                assert "tools" in kwargs
+                assert "response_format" not in kwargs
+                return FakeInteraction(output_text="NVIDIA reports record revenue.", steps=grounded_steps)
+            elif call_index == 2:
+                # Second call: cheap conversion using MODEL_FLASH, no tools, WITH response_format
+                assert kwargs["model"] == config.MODEL_FLASH
+                assert "tools" not in kwargs
+                assert "response_format" in kwargs
+                return FakeInteraction(output_text=json.dumps({"name": "NVDA", "score": 98}))
+            raise ValueError(f"Unexpected call {call_index}")
+
+        client = FakeClient(handler)
+        set_client(client)
+
+        res = await ask(
+            model=config.MODEL_ARGON,
+            input="Search for NVDA news and return schema",
+            tools=("google_search",),
+            schema=SimpleSchema,
+            agent="DISCOVERY",
+        )
+
+        assert call_index == 2
+        assert isinstance(res.data, SimpleSchema)
+        assert res.data.name == "NVDA"
+        assert res.data.score == 98
+        # Sources and citations should come from the first (grounded) call!
+        assert len(res.sources) == 1
+        assert res.sources[0]["url"] == "https://nvidianews.nvidia.com"
+        assert len(res.citations) == 1
+        assert res.citations[0]["start"] == 0
+
+    asyncio.run(_test())
+

@@ -49,7 +49,10 @@ async def test_call_1_flash_search_schema() -> bool:
         duration = int((time.perf_counter() - start) * 1000)
         assert isinstance(res.data, DiscoverySchema), f"Expected DiscoverySchema, got {type(res.data)}"
         assert res.data.symbol.upper() == "NVDA", f"Unexpected symbol: {res.data.symbol}"
-        print(f"[OK] Call 1 passed: symbol={res.data.symbol}, sources={len(res.sources)}, duration={duration}ms")
+        assert len(res.sources) >= 1, f"Expected sources >= 1 in schema mode, got {len(res.sources)}"
+        print(f"[OK] Call 1 passed: symbol={res.data.symbol}, sources={len(res.sources)}, citations={len(res.citations)}, duration={duration}ms")
+        for src in res.sources[:3]:
+            print(f"  source: {src.get('title')} -> {src.get('url')[:60]}...")
         return True
     except Exception as e:
         duration = int((time.perf_counter() - start) * 1000)
