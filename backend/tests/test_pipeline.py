@@ -1,0 +1,87 @@
+import asyncio
+import json
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from app import agents, pipeline
+from app.models import Candidate, Finding, IntakeInput, Report
+
+INTAKE = IntakeInput(amountUsd=10000, horizonYears=2, riskTolerance="MODERATE", theme="AI")
+ROUNDS = json.loads(pipeline.FIXTURE.read_text())["report"]["rounds"]
+
+
+def F(ids, agent, sym, sent):
+    return Finding(id=f"f_{next(ids)}", agent=agent, symbol=sym, claim="c", sentiment=sent, sources=[])
+
+
+@pytest.fixture
+def fakes(monkeypatch):
+    seen = {}
+
+    async def discovery(intake, ids, on_step=None):
+        await on_step({"query": "AI stocks"})
+        return [Candidate(symbol="NVDA", name="Nvidia", assetClass="STOCKS"),
+                Candidate(symbol="GLD", name="Gold", assetClass="GOLD")], [F(ids, "DISCOVERY", "NVDA", "POSITIVE")]
+
+    async def financials(stocks, ids, on_step=None):
+        return {"NVDA": (8.0, "good")}, [F(ids, "FINANCIALS", "NVDA", "POSITIVE")]
+
+    async def landscape(syms, ids, on_step=None):
+        return [F(ids, "LANDSCAPE", "NVDA", "NEUTRAL")]
+
+    async def news(syms, ids, on_step=None):
+        return [F(ids, "NEWS", "NVDA", "NEGATIVE")]
+
+    async def social(syms, ids, on_step=None):
+        return {"NVDA": 0.5}, [F(ids, "SOCIAL", "NVDA", "POSITIVE")]
+
+    for fn in (discovery, financials, landscape, news, social):
+        monkeypatch.setattr(agents, fn.__name__, fn)
+
+    async def decide(intake, cands, findings, emit):
+        seen["cands"] = cands
+        await emit({"type": "allocation.proposed", "round": 1, "allocation": ROUNDS[0]["allocation"]})
+        return ROUNDS
+
+    async def summarize(intake, rounds, findings):
+        return "summary"
+
+    monkeypatch.setitem(sys.modules, "app.decide", SimpleNamespace(decide=decide, summarize=summarize))
+    monkeypatch.setenv("PIPELINE", "real")
+    return seen
+
+
+def go():
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    report = asyncio.run(pipeline.run_pipeline("run_x", INTAKE, emit))
+    return report, events
+
+
+def test_real_flow_order_and_report(fakes):
+    report, events = go()
+    assert isinstance(report, Report) and report.runId == "run_x" and report.summary == "summary"
+    assert report.finalAllocation == report.rounds[-1].allocation and len(report.findings) == 5
+    types = [(e["type"], e.get("agent")) for e in events]
+    assert types[0] == ("run.started", None)
+    assert types.index(("agent.completed", "DISCOVERY")) < types.index(("agent.started", "FINANCIALS"))
+    assert types.index(("agent.completed", "SOCIAL")) < types.index(("allocation.proposed", None))
+    assert ("agent.progress", "DISCOVERY") in types
+    nvda = next(c for c in fakes["cands"] if c.symbol == "NVDA")
+    assert nvda.financialScore == 8.0
+    assert nvda.sentimentScore == -0.25  # mean(social 0.5, news NEGATIVE -1.0)
+
+
+def test_failing_agent_does_not_stop_run(fakes, monkeypatch):
+    async def bad(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(agents, "news", bad)
+    report, events = go()
+    assert ("agent.failed", "NEWS") in [(e["type"], e.get("agent")) for e in events]
+    assert isinstance(report, Report) and all(f.agent != "NEWS" for f in report.findings)
