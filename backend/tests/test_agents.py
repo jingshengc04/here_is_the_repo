@@ -105,7 +105,7 @@ def _prices(monkeypatch):
     rng = np.random.default_rng(1)
     vols = {"BRK-B": .03, "JNJ": .01, "PG": .015, "KO": .02, "PEP": .03, "WMT": .04, "COST": .05, "MCD": .06, "V": .07, "MRK": .08}
     df = pd.DataFrame({k: 100 * np.cumprod(1 + rng.normal(0, v, 100)) for k, v in vols.items()}, index=idx)
-    monkeypatch.setattr(data, "prices", lambda syms, years=5: (df, []))
+    monkeypatch.setattr(data, "prices", lambda syms, years=5: (df[[c for c in syms if c in df]], []))
     monkeypatch.setattr(data, "resolve", lambda s: True)
 
 
@@ -282,3 +282,66 @@ def test_defensive_style_adds_three_ballast_even_when_aggressive(monkeypatch):
     _prices(monkeypatch)
     cands, *_ = _discover_prefs(monkeypatch, [P("NVDA")], styles=["DEFENSIVE"])
     assert [c.symbol for c in cands] == ["NVDA", "JNJ", "PG", "KO", "GLD"]
+
+
+# ---------------- Wave 5A: bonds ----------------
+def _bond_prices(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2021-01-01", periods=100, freq="W-FRI")
+    # drawdown depth: SHY smallest, then BIL, TIP, BND, AGG, IEF, VGSH deepest; defensive stocks flat-ish
+    depth = {"SHY": .02, "BIL": .03, "TIP": .06, "BND": .10, "AGG": .12, "IEF": .15, "VGSH": .20}
+    cols = {}
+    for k, d in depth.items():
+        v = np.ones(100)
+        v[50:] = 1 - d  # one step down = max drawdown d
+        cols[k] = 100 * v
+    for k in agents.DEFENSIVE:
+        cols[k] = 100 * np.cumprod(1 + np.random.default_rng(len(k)).normal(0, .01, 100))
+    df = pd.DataFrame(cols, index=idx)
+    monkeypatch.setattr(data, "prices", lambda syms, years=5: (df[[c for c in syms if c in df]], []))
+    monkeypatch.setattr(data, "resolve", lambda s: True)
+    monkeypatch.setattr(data, "company_info", lambda s: {})
+
+
+def _bonds(monkeypatch, risk, **prefs):
+    _bond_prices(monkeypatch)
+    intake = INTAKE.model_copy(update={"riskTolerance": risk, "preferences": Preferences(**prefs) if prefs else None})
+    _capture(monkeypatch, agents.DiscoveryOut(picks=[P("NVDA")]))
+    notes = []
+    cands, fs = run(agents.discovery(intake, count(1), notes_out=notes))
+    return [c for c in cands if c.assetClass == "BONDS"], fs, notes
+
+
+def test_asset_class_marks_bond_etfs():
+    assert agents._asset_class("SHY") == "BONDS" and agents._asset_class("TLT") == "BONDS"
+    assert agents._asset_class("GLD") == "GOLD" and agents._asset_class("NVDA") == "STOCKS"
+
+
+def test_conservative_gets_two_lowest_drawdown_bonds(monkeypatch):
+    bonds, fs, _ = _bonds(monkeypatch, "CONSERVATIVE")
+    assert [b.symbol for b in bonds] == ["SHY", "BIL"]
+    f = next(f for f in fs if f.symbol == "SHY")
+    assert "bond ballast" in f.claim and "CONSERVATIVE" in f.claim and "-2.0%" in f.claim
+
+
+def test_moderate_gets_one_bond_and_aggressive_none(monkeypatch):
+    assert [b.symbol for b in _bonds(monkeypatch, "MODERATE")[0]] == ["SHY"]
+    assert _bonds(monkeypatch, "AGGRESSIVE")[0] == []
+
+
+def test_aggressive_with_bonds_target_or_defensive_style_adds_bonds(monkeypatch):
+    assert [b.symbol for b in _bonds(monkeypatch, "AGGRESSIVE", assetClassTargets={"BONDS": 20})[0]] == ["SHY"]
+    assert [b.symbol for b in _bonds(monkeypatch, "AGGRESSIVE", assetClassTargets={"BONDS": 40})[0]] == ["SHY", "BIL"]
+    assert [b.symbol for b in _bonds(monkeypatch, "AGGRESSIVE", styles=["DEFENSIVE"])[0]] == ["SHY"]
+
+
+def test_exclude_bonds_gives_none_plus_note(monkeypatch):
+    for word in ("bonds", "Treasuries"):
+        bonds, _, notes = _bonds(monkeypatch, "CONSERVATIVE", exclude=[word])
+        assert bonds == [] and any("Bonds were excluded" in n for n in notes)
+
+
+def test_requested_bond_counts_toward_quota(monkeypatch):
+    bonds, *_ = _bonds(monkeypatch, "CONSERVATIVE", mustInclude=["BND"])
+    assert sorted(b.symbol for b in bonds) == ["BND", "SHY"] and next(b for b in bonds if b.symbol == "BND").isUserRequested
