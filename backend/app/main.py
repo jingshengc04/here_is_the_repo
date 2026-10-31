@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import pipeline
+from . import pipeline, replay as replay_module
 from .models import ErrorBody, IntakeInput, Run
 
 log = logging.getLogger("app")
@@ -55,7 +55,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-async def _execute(run_id: str, intake: IntakeInput) -> None:
+async def _execute(run_id: str, intake: IntakeInput, replay_name: str | None = None) -> None:
     st = RUNS[run_id]
     run: Run = st["run"]
 
@@ -66,9 +66,16 @@ async def _execute(run_id: str, intake: IntakeInput) -> None:
 
     run.status = "RUNNING"
     try:
-        report = await pipeline.run_pipeline(run_id, intake, emit)
+        if replay_name:
+            report = await replay_module.run_replay(run_id, intake, replay_name, emit)
+        else:
+            report = await pipeline.run_pipeline(run_id, intake, emit)
         run.report, run.status = report, "COMPLETED"
         await emit({"type": "run.completed", "report": report.model_dump()})
+        try:
+            replay_module.save_run(run_id, intake, st["events"])
+        except Exception:
+            log.exception("failed to save run")
     except Exception:
         log.exception("pipeline failed")
         run.status = "FAILED"
@@ -82,13 +89,18 @@ async def health():
 
 
 @app.post("/api/runs", status_code=202)
-async def create_run(intake: IntakeInput) -> Run:
+async def create_run(intake: IntakeInput, replay: str | None = None) -> Run:
+    if replay:
+        if not replay_module.is_valid_name(replay):
+            raise APIErr(422, "VALIDATION_ERROR", "Invalid replay name", {"replay": "Name must match ^[A-Za-z0-9_-]+$"})
+        if not replay_module.find_replay_file(replay):
+            raise APIErr(404, "RUN_NOT_FOUND", f"Replay '{replay}' not found")
     if any(s["run"].status in ("QUEUED", "RUNNING") for s in RUNS.values()):
         raise APIErr(429, "RATE_LIMITED", "A run is already in progress. Try again shortly.")
     run_id = "run_" + uuid.uuid4().hex[:12]
     run = Run(runId=run_id, status="QUEUED", intake=intake, createdAt=_now())
     RUNS[run_id] = {"run": run, "events": [], "cond": asyncio.Condition()}
-    RUNS[run_id]["task"] = asyncio.create_task(_execute(run_id, intake))  # keep a ref so it isn't GC'd
+    RUNS[run_id]["task"] = asyncio.create_task(_execute(run_id, intake, replay))  # keep a ref so it isn't GC'd
     return run
 
 
