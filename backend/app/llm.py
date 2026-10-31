@@ -25,6 +25,7 @@ class AskResult:
     duration_ms: int
     sources: list[dict]
     citations: list[dict] = field(default_factory=list)
+    grounded_text: str = ""  # two-step search path: step-1 text that citation start/end offsets index
 
 
 def text_part(s: str) -> dict:
@@ -296,6 +297,7 @@ async def ask(
         raise RuntimeError("Retries exhausted without result")
 
     is_search_with_schema = has_google_search and (schema is not None)
+    grounded_text = ""
 
     if is_search_with_schema:
         # Step 1: Make grounded search call WITHOUT response_format to preserve url_citations
@@ -328,7 +330,8 @@ async def ask(
         convert_prompt = (
             f"Original user request: {_truncate_and_strip(input, 1000)}\n\n"
             f"Grounded research text:\n{grounded_text}\n\n"
-            f"Extract and return valid JSON matching the schema."
+            f"Extract and return valid JSON matching the schema. Keep every claim as close to the grounded wording as "
+            f"possible: do not paraphrase numbers, names or dates."
         )
 
         schema_interaction, _ = await _call_with_retries(
@@ -417,4 +420,5 @@ async def ask(
         duration_ms=duration_ms,
         sources=sources,
         citations=citations,
+        grounded_text=grounded_text,
     )

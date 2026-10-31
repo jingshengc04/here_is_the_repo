@@ -477,6 +477,19 @@ def test_search_with_schema_two_step_fallback():
         assert res.sources[0]["url"] == "https://nvidianews.nvidia.com"
         assert len(res.citations) == 1
         assert res.citations[0]["start"] == 0
+        # Wave 9A: the grounded step-1 text is kept and citation offsets index it
+        assert res.grounded_text == "NVIDIA reports record revenue."
+        c = res.citations[0]
+        assert res.grounded_text[c["start"]:c["end"]] == "NVIDIA reports record revenue"
 
     asyncio.run(_test())
+
+
+def test_grounded_text_empty_without_two_step_and_conversion_prompt_keeps_wording():
+    from app.llm import AskResult
+    assert AskResult(data=None, text="", steps=[], model_used="m", duration_ms=1, sources=[]).grounded_text == ""
+    import inspect
+    from app import llm
+    src = inspect.getsource(llm.ask)
+    assert "do not paraphrase" in src.lower()  # conversion step must keep grounded wording and numbers
 
