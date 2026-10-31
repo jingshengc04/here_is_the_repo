@@ -30,6 +30,27 @@ Python backend that implements [`API_CONTRACT.md`](API_CONTRACT.md): it takes an
 - **Weights:** the LLM proposes them, and Python normalises them to exactly 100 and rounds them before anything is emitted. The UI never recomputes them.
 - **Secrets:** `GEMINI_API_KEY` comes from the environment only (`.env` locally, a Cloud Run environment variable or secret in production). `.gitignore` already excludes `.env`.
 
+## Verified API facts (live-tested 2026-10-31 against the hackathon key; workers: use these exactly)
+
+```python
+from google import genai
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+i = client.interactions.create(
+    model="gemini-3.8-flash",               # or "gemini-4-argon"
+    input="..." ,                            # or list of parts (see CSV below)
+    tools=[{"type": "google_search"}],       # and/or {"type": "code_execution"}
+    response_format={"type": "text", "mime_type": "application/json", "schema": Model.model_json_schema()},
+)
+Model.model_validate_json(i.output_text)
+# i.steps[*].type ∈ thought | model_output | google_search_call | google_search_result
+#                    | code_execution_call (.arguments.code) | code_execution_result (.result)
+# CSV into sandbox: input=[{"type":"text","text":"..."},
+#                          {"type":"document","mime_type":"text/csv","data":base64_str}]
+```
+- ✅ Search grounding plus a schema on `gemini-4-argon` (about 11s). ✅ A CSV in the sandbox with pandas computing a 60/40 weekly-rebalanced return exactly (about 18s).
+- Latency: about 5s for a basic call, about 10s with search or code execution. Budget about 2–3 minutes for a full run.
+- ✅ yfinance works: `yf.download([...], period="5y", interval="1wk", auto_adjust=True)["Close"]` returns 262 rows. `Ticker(s).info["trailingPE"]` works too.
+
 ## File layout (target)
 
 ```
@@ -144,7 +165,7 @@ Everything gets pushed to GitHub and the demo video is recorded before the accou
 | Yahoo blocks or rate-limits Cloud Run IPs | High | Disk cache plus pre-fetched data for the likely tickers committed to the repo |
 | `gemini-4-argon` 503 under hackathon load | High | Retry, then fall back to `gemini-3.8-flash`; Task 11 replay |
 | Sandbox 30s limit on the backtest | Med | Weekly (not daily) prices for 12 or fewer symbols over 5 years, about 260 rows |
-| Combining structured output with tools is "Preview" | Med | If it fails, make two calls: one with tools that returns text, then one with the schema |
+| Combining structured output with tools is "Preview" | Low | ✅ Live-tested and works. Fallback if it breaks: make two calls, one with tools and one with the schema |
 | In-memory state lost on Cloud Run restart | Low | `min-instances=1`; the frontend falls back to `GET /api/runs/{id}` |
 | Look-ahead bias accusation | Med | We only backtest *today's* weights over history and say so in the disclaimer |
 
