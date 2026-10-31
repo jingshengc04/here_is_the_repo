@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Vibe Trader wireframes</title>
+<title>Vibe Trader wireframes v2 — portfolio agents</title>
+<!-- v2: follows docs/API_CONTRACT.md (chat intake → 7 agents over SSE → verified two-level portfolio).
+     Numbers come from docs/fixtures/report.example.json. Previous strategy-backtester version is in git history. -->
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: "Inter", "Helvetica Neue", Arial, "Noto Sans CJK SC", sans-serif; background: #e9e9ec; color: #1d1d22; }
@@ -20,197 +22,492 @@
   .box.p1 { border-style: dashed; border-color: #999; background: #fcfcfd; }
   .tag { position: absolute; top: -11px; left: 10px; background: #e63946; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; white-space: nowrap; z-index: 2; }
   .tag.d { background: #1d6fe0; }
+  .tag.note { background: #666; }
   .label { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #888; font-weight: 700; margin-bottom: 8px; }
   .btn { display: inline-flex; align-items: center; justify-content: center; border-radius: 8px; font-weight: 700; font-size: 15px; padding: 10px 20px; }
   .btn.primary { background: #111; color: #fff; }
-  .chip { display: inline-block; border: 1.5px dashed #999; border-radius: 999px; padding: 6px 12px; font-size: 13px; color: #444; margin-right: 8px; background: #f4f4f6; }
-  .select { border: 2px solid #ccc; border-radius: 8px; padding: 8px 12px; font-size: 14px; color: #444; background: #fff; min-width: 110px; }
+  .chip { display: inline-block; border: 1.5px dashed #999; border-radius: 999px; padding: 4px 10px; font-size: 12px; color: #444; background: #f4f4f6; }
+  .input { border: 2px solid #ccc; border-radius: 8px; padding: 8px 12px; font-size: 15px; color: #222; background: #fff; }
+  .muted { color: #888; }
+  .mono { font-family: ui-monospace, Menlo, monospace; }
 
-  /* verdict colours */
+  /* verdict colours (unchanged from v1) */
   .green { color: #1a8f4c; } .yellow { color: #b88a00; } .red { color: #d62828; }
   .bg-green { background: #e5f6ec; border-color: #1a8f4c; }
   .bg-yellow { background: #fff6d6; border-color: #e0b100; }
   .bg-red { background: #fde8e8; border-color: #d62828; }
 
+  /* asset-class colours (new): holdings are shades of their class */
+  .c-stocks { color: #2f5bea; } .c-crypto { color: #7c4dff; } .c-gold { color: #b8860b; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: 0; }
+
+  /* chat */
+  .msg { max-width: 78%; padding: 9px 13px; border-radius: 14px; font-size: 15px; line-height: 1.4; margin-bottom: 10px; }
+  .msg.a { background: #f0f0f3; border-bottom-left-radius: 4px; }
+  .msg.u { background: #111; color: #fff; margin-left: auto; border-bottom-right-radius: 4px; }
+
+  /* agent lanes */
+  .agent { border: 2px solid #bbb; border-radius: 10px; background: #fff; padding: 10px 12px; position: relative; font-size: 13px; }
+  .agent .name { font-weight: 800; font-size: 14px; letter-spacing: .5px; }
+  .agent .model { font-size: 11px; color: #888; }
+  .agent .state { position: absolute; top: 9px; right: 10px; font-size: 11px; font-weight: 800; padding: 2px 7px; border-radius: 999px; }
+  .agent.done { border-color: #1a8f4c; } .agent.done .state { background: #e5f6ec; color: #1a8f4c; }
+  .agent.running { border-color: #111; box-shadow: 0 0 0 3px rgba(17,17,17,.08); } .agent.running .state { background: #111; color: #fff; }
+  .agent.idle { border-style: dashed; color: #999; } .agent.idle .state { background: #eee; color: #888; }
+  .agent.failed { border-color: #d62828; } .agent.failed .state { background: #fde8e8; color: #d62828; }
+  .agent.rejected { border-color: #d62828; background: #fffafa; } .agent.rejected .state { background: #d62828; color: #fff; }
+  .arrow { text-align: center; color: #aaa; font-size: 18px; line-height: 1; margin: 4px 0; }
+
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; }
+
   .legend { position: absolute; bottom: 10px; right: 16px; font-size: 11px; color: #555; display: flex; gap: 12px; align-items: center; }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 4px; vertical-align: -2px; }
   .legend i.dash { background: #fff; border: 1.5px dashed #999; }
+  .footer { position: absolute; bottom: 8px; left: 28px; font-size: 11px; color: #999; }
 </style>
 </head>
 <body>
 
-<!-- ========================= SCREEN 1 : BUILD ========================= -->
+<!-- ========================= SCREEN 1 : ONBOARDING CHAT + CONFIRM CARD ========================= -->
 <div class="screen" id="s1">
-  <div class="title-bar"><b>①</b> 生成页 Build — 用户输入策略 → 解析 → 规则卡片确认（MVP：只读规则，无澄清问题）</div>
+  <div class="title-bar"><b>①</b> 开始页 Onboarding — 先和 Intake agent 聊（POST /api/intake/messages，前端保存完整对话）→ isComplete 后出确认卡片，可改字段 → 用户点 Run（绝不自动开始）</div>
   <div class="app">
     <div class="nav">
-      <div class="logo">VibeTrader <span>The backtester that tells you the truth</span></div>
+      <div class="logo">VibeTrader <span>A team of AI agents builds — and audits — your portfolio</span></div>
+      <span class="muted" style="font-size:12px;">产品名 / 标语待定</span>
     </div>
 
-    <!-- prompt -->
-    <div class="box" style="padding:18px 20px; height:190px;">
-      <div class="tag">C · PromptInput 策略输入框</div>
-      <div class="label">Describe your strategy</div>
-      <div style="border:2px solid #ccc; border-radius:8px; height:70px; padding:10px 12px; font-size:16px; color:#333;">
-        Buy when price is unusually low compared to normal, sell when it recovers<span style="border-left:2px solid #111; margin-left:2px;">&nbsp;</span>
-      </div>
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:14px;">
-        <div style="position:relative;">
-          <span class="tag" style="top:-20px; left:0;">C · 预设按钮 PresetChips（3 个）</span>
-          <span class="chip">🎯 Buy the dip</span><span class="chip">📅 RSI on Tuesdays</span><span class="chip">📈 200-day trend</span>
+    <div style="display:grid; grid-template-columns: 1.3fr 1fr; gap:24px;">
+      <!-- LEFT: chat -->
+      <div class="box" style="padding:16px 18px; height:600px; display:flex; flex-direction:column;">
+        <div class="tag">C · IntakeChat 对话（每轮把全部历史发给后端，≤ 20 条，每条 ≤ 2000 字）</div>
+
+        <!-- live draft -->
+        <div style="display:flex; gap:8px; align-items:center; padding-bottom:12px; border-bottom:1px solid #eee; position:relative;">
+          <span class="tag" style="top:auto; bottom:-10px; left:auto; right:0;">C · IntakeDraft（IntakeTurn.intake 实时点亮）</span>
+          <span class="label" style="margin:0 6px 0 0;">So far</span>
+          <span class="chip" style="border-style:solid; border-color:#1a8f4c; color:#1a8f4c; background:#e5f6ec;">✓ $10,000</span>
+          <span class="chip" style="border-style:solid; border-color:#1a8f4c; color:#1a8f4c; background:#e5f6ec;">✓ 2 years</span>
+          <span class="chip" style="border-style:solid; border-color:#1a8f4c; color:#1a8f4c; background:#e5f6ec;">✓ Moderate</span>
+          <span class="chip" style="border-style:solid; border-color:#1a8f4c; color:#1a8f4c; background:#e5f6ec;">✓ AI infrastructure</span>
         </div>
-        <div style="display:flex; gap:10px; align-items:center; position:relative;">
-          <span class="tag" style="top:-20px; left:0;">C · 资产 AssetSelect（BTC / SPY，固定 1d）</span>
-          <span class="select">BTC ▾</span>
-          <span class="btn primary">Parse →</span>
+
+        <div style="flex:1; padding-top:14px; overflow:hidden;">
+          <div class="msg a">Hi! How much are you looking to invest, and what are you hoping for? <span class="muted" style="font-size:11px;">(前端写死)</span></div>
+          <div class="msg u">I have about 10k, want growth but can't stomach crypto crashes</div>
+          <div class="msg a">Got it: $10,000 with moderate risk. How long can you leave it invested, 1 year or more like 5?</div>
+          <div class="msg u">About 2 years. I'm really into AI infrastructure.</div>
+          <div class="msg a">Great — $10,000 for 2 years, moderate risk, focused on AI infrastructure. Check the card on the right and press <b>Run</b> when it looks right.</div>
+          <div class="muted" style="font-size:12px; margin-top:2px;">● Intake agent is typing… <span style="color:#bbb;">(等待回复时显示)</span></div>
+        </div>
+
+        <div style="display:flex; gap:10px; align-items:center; border-top:1px solid #eee; padding-top:12px;">
+          <div class="input" style="flex:1; color:#aaa;">Type a message…</div>
+          <span class="btn primary">Send</span>
+        </div>
+        <div style="font-size:12px; margin-top:8px;" class="muted">Prefer a form? <u>Skip the chat</u> → 只显示右侧卡片</div>
+      </div>
+
+      <!-- RIGHT: confirm card -->
+      <div>
+        <div class="box" style="padding:18px 20px;">
+          <div class="tag">C · ConfirmCard（isComplete 后出现；全部可改；= 聊天失败时的普通表单）</div>
+          <div class="label">Confirm your plan</div>
+
+          <div style="font-size:13px; font-weight:700; margin-top:6px;">Amount (USD)</div>
+          <div class="input" style="margin-top:4px;">$ 10,000</div>
+          <div class="red" style="font-size:12px; margin-top:3px;">422 示例 → details.amountUsd：“Must be between 100 and 10,000,000”</div>
+
+          <div style="font-size:13px; font-weight:700; margin-top:14px;">Horizon <span class="muted" style="font-weight:500;">· 2 years</span></div>
+          <div style="display:flex; gap:4px; margin-top:6px;">
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">1</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px; background:#111; color:#fff; border-color:#111;">2</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">3</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">4</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">5</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">6</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">7</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">8</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">9</span>
+            <span class="input" style="padding:5px 0; width:34px; text-align:center; font-size:13px;">10</span>
+          </div>
+
+          <div style="font-size:13px; font-weight:700; margin-top:14px;">Risk tolerance</div>
+          <div style="display:flex; margin-top:6px; border:2px solid #ccc; border-radius:8px; overflow:hidden; font-size:14px; font-weight:700;">
+            <span style="flex:1; text-align:center; padding:8px 0;">Conservative</span>
+            <span style="flex:1; text-align:center; padding:8px 0; background:#111; color:#fff;">Moderate</span>
+            <span style="flex:1; text-align:center; padding:8px 0;">Aggressive</span>
+          </div>
+          <div class="muted" style="font-size:12px; margin-top:4px;">Max drawdown limit: −20% · <b>−35%</b> · −55%（Verifier 用这个标准审）</div>
+
+          <div style="font-size:13px; font-weight:700; margin-top:14px;">Theme <span class="muted" style="font-weight:500;">(optional)</span></div>
+          <div class="input" style="margin-top:4px; display:flex; justify-content:space-between;">AI infrastructure <span class="muted" style="font-size:12px;">17 / 200</span></div>
+
+          <div style="display:flex; justify-content:flex-end; margin-top:18px;">
+            <span class="btn primary" style="font-size:17px; padding:12px 30px;">▶ Run — build my portfolio</span>
+          </div>
+        </div>
+
+        <div class="box p1" style="margin-top:22px; padding:12px 16px; font-size:13px; line-height:1.6;">
+          <div class="tag note">状态说明</div>
+          • <b>聊天接口出错</b> → 隐藏左侧，右侧卡片变成空白普通表单（demo 不能依赖聊天）<br>
+          • <b>429 RATE_LIMITED</b> → toast “Another run is in progress — try again in a minute”<br>
+          • 点 Run → POST /api/runs（202）→ 页面向下进入 ②
         </div>
       </div>
     </div>
 
-    <!-- support banner -->
-    <div class="box bg-yellow" style="margin-top:22px; padding:12px 18px;">
-      <div class="tag">C · SupportBanner（supported / approximated / unsupported，纯文字）</div>
-      <div style="font-size:15px;"><b class="yellow">⚠ Approximated</b> &nbsp;“Unusually low” is ambiguous — we'll use a <b>20-day z-score below −2</b>. Not the full-history mean (that would leak the future).</div>
-    </div>
+    <div class="footer">Educational demo only. Not financial advice. · Data: Yahoo Finance (yfinance) · Google Search</div>
+    <div class="legend"><span><i style="background:#e63946"></i>C 负责</span><span><i style="background:#1d6fe0"></i>D 负责</span><span><i class="dash"></i>说明 / 异常状态</span></div>
+  </div>
+</div>
 
-    <!-- rule cards -->
-    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:18px; margin-top:22px;">
-      <div class="box" style="padding:16px; height:180px;">
-        <div class="tag">C · RuleCard 入场（只读）</div>
-        <div class="label">Entry</div>
-        <div style="font-size:16px; line-height:1.7;">• z-score(close, 20) &lt; −2<br>• position = 100% long</div>
-      </div>
-      <div class="box" style="padding:16px; height:180px;">
-        <div class="tag">C · RuleCard 出场（只读）</div>
-        <div class="label">Exit</div>
-        <div style="font-size:16px; line-height:1.7;">• z-score(close, 20) &gt; 0<br>• or stop-loss −5%</div>
-      </div>
-      <div class="box" style="padding:16px; height:180px;">
-        <div class="tag">C · RuleCard 参数（只读）</div>
-        <div class="label">Params</div>
-        <div style="font-size:16px; line-height:1.7;">lookback = 20 days<br>threshold = −2.0<br>fees = 10 bps / trade</div>
+<!-- ========================= SCREEN 2 : AGENTS AT WORK ========================= -->
+<div class="screen" id="s2">
+  <div class="title-bar"><b>②</b> Agents at work — EventSource 订阅 /api/runs/{id}/events，7 个 agent 卡片实时动；截图时刻 = 第 1 轮被 Verifier 驳回，Orchestrator 正在第 2 轮调仓</div>
+  <div class="app">
+    <div class="nav">
+      <div class="logo">VibeTrader <span>$10,000 · 2 years · Moderate · AI infrastructure</span></div>
+      <div style="display:flex; gap:14px; align-items:center; font-size:13px; position:relative;">
+        <span class="tag" style="position:static;">C · RunStatusBar（SSE 断开 → 每 3s 轮询 GET /api/runs/{id}）</span>
+        <span><b>RUNNING</b> · Round <b>2</b> / 2</span>
+        <span class="mono muted">01:42</span>
+        <span class="green" style="font-weight:700;">● Live</span>
       </div>
     </div>
 
-    <div style="display:flex; justify-content:flex-end; margin-top:18px; position:relative;">
-      <span class="tag" style="top:-14px; right:0; left:auto;">C · ConfirmButton（unsupported 时禁用）</span>
-      <span class="btn primary" style="font-size:17px; padding:12px 26px;">✓ Confirm &amp; Run backtest</span>
+    <div style="display:grid; grid-template-columns: 1.75fr 1fr; gap:22px;">
+      <!-- LEFT: pipeline -->
+      <div class="box" style="padding:16px 16px 12px;">
+        <div class="tag">C · AgentLanes（每个 AgentId 一张卡：idle → running → done | failed）</div>
+
+        <!-- stage 1 -->
+        <div class="agent done" style="width:46%; margin:0 auto;">
+          <span class="state">✓ DONE · 8.2s</span>
+          <div class="name">🔎 DISCOVERY</div><div class="model">gemini-3.8-flash · Google Search</div>
+          <div style="margin-top:5px;">Found 5 stocks, 3 coins + GLD</div>
+        </div>
+        <div class="arrow">↓ &nbsp;<span style="font-size:11px;">4 个并行</span>&nbsp; ↓</div>
+
+        <!-- stage 2 (parallel) -->
+        <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:10px;">
+          <div class="agent done"><span class="state">✓</span><div class="name">📊 FINANCIALS</div><div class="model">code execution · 11.4s</div><div style="margin-top:5px;">Scored 5 stocks 1–10 from statements</div></div>
+          <div class="agent done"><span class="state">✓</span><div class="name">🗺 LANDSCAPE</div><div class="model">Search · 9.0s</div><div style="margin-top:5px;">Mapped competitors & moats</div></div>
+          <div class="agent done"><span class="state">✓</span><div class="name">📰 NEWS</div><div class="model">Search · 7.8s</div><div style="margin-top:5px;">Latest news per holding</div></div>
+          <div class="agent done"><span class="state">✓</span><div class="name">💬 SOCIAL</div><div class="model">Search · 6.5s</div><div style="margin-top:5px;">Reddit / X sentiment</div></div>
+        </div>
+        <div class="arrow">↓</div>
+
+        <!-- stage 3: orchestrator / verifier rounds -->
+        <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+          <div>
+            <div class="agent done" style="opacity:.55;"><span class="state">✓ ROUND 1</span><div class="name">🧭 ORCHESTRATOR</div><div class="model">gemini-4-argon</div>
+              <div style="margin-top:5px;">Stocks 35 · <b>Crypto 40</b> · Gold 25</div></div>
+            <div class="arrow">↓</div>
+            <div class="agent running"><span class="state">● ROUND 2</span><div class="name">🧭 ORCHESTRATOR</div><div class="model">gemini-4-argon</div>
+              <div style="margin-top:5px;">“Cutting crypto to 25%, adding LLY as a diversifier…” <span class="muted">← agent.progress</span></div></div>
+          </div>
+          <div>
+            <div class="agent rejected"><span class="state">✕ REJECTED · R1</span><div class="name">🛡 VERIFIER</div><div class="model">gemini-4-argon · sandbox backtest</div>
+              <div style="margin-top:6px; font-size:12.5px; line-height:1.5;">
+                <span class="red">✕</span> Max drawdown −41.3% &gt; MODERATE limit −35%<br>
+                <span class="green">✓</span> Weights = 100% &nbsp;<span class="green">✓</span> Sandbox ≈ independent &nbsp;<span class="green">✓</span> Max holding ≤ 25%
+              </div>
+              <div style="margin-top:6px; padding:6px 8px; background:#fde8e8; border-radius:6px; font-size:12.5px;">
+                <b>Changes requested</b><br>• Cut crypto below 30%<br>• Add a low-correlation equity
+              </div>
+            </div>
+            <div class="arrow">↓</div>
+            <div class="agent idle"><span class="state">WAITING · R2</span><div class="name">🛡 VERIFIER</div><div class="model">gemini-4-argon</div></div>
+          </div>
+        </div>
+        <div style="font-size:11px; margin-top:8px;" class="muted">
+          状态色：<span class="green">■ done</span> · <b>■ running</b> · <span style="color:#aaa;">▢ idle</span> · <span class="red">■ failed（agent.failed，整次 run 继续）</span> · 驳回卡片 = 红底，是 demo 高潮
+        </div>
+      </div>
+
+      <!-- RIGHT: findings feed -->
+      <div class="box" style="padding:14px 14px; height:640px;">
+        <div class="tag">C · FindingsFeed（agent.finding 实时追加，最新在上）</div>
+        <div class="label">Live findings · 16</div>
+        <div id="feed" style="font-size:13px; line-height:1.4; height:570px; overflow:hidden;"></div>
+      </div>
     </div>
-    <div style="position:absolute; bottom:8px; left:28px; font-size:11px; color:#999;">Not investment advice · Data: Binance via ccxt, Yahoo Finance</div>
+
+    <div class="footer">Educational demo only. Not financial advice.</div>
     <div class="legend"><span><i style="background:#e63946"></i>C 负责</span><span><i style="background:#1d6fe0"></i>D 负责</span></div>
   </div>
 </div>
 
-<!-- ========================= SCREEN 2 : RESULTS ========================= -->
-<div class="screen" id="s2">
-  <div class="title-bar"><b>②</b> 结果页 Results — 评委盯着看最久的画面（D 优先打磨；虚线框 = P1）</div>
+<!-- ========================= SCREEN 3 : RESULTS — ROUND 1 → ROUND 2 ========================= -->
+<div class="screen" id="s3">
+  <div class="title-bar"><b>③</b> 结果页（上半）— run.completed：第 1 轮被驳回 → 第 2 轮通过。评委盯着看最久的画面（D 优先打磨）</div>
   <div class="app">
     <div class="nav">
-      <div class="logo">VibeTrader <span>Buy the dip (z-score) · BTC · 1d</span></div>
+      <div class="logo">Your portfolio <span>$10,000 · 2 years · Moderate · AI infrastructure</span></div>
+      <span class="btn bg-green" style="border:2px solid; font-size:15px; padding:6px 14px;"><span class="green">✓ Approved by Verifier in round 2</span></span>
     </div>
 
-    <!-- progress -->
-    <div class="box" style="padding:10px 18px; display:flex; gap:26px; font-size:14px; align-items:center;">
-      <div class="tag">C · ProgressStepper 运行进度（定时器推进）</div>
-      <span class="green">✓ Generate code</span><span class="green">✓ Sandbox run</span><span class="green">✓ Look-ahead test</span><span class="green">✓ Backtest</span><span class="green">✓ Audit</span>
-      <span style="margin-left:auto; color:#888;">done in 23s</span>
+    <div class="box" style="padding:12px 18px; font-size:15px; line-height:1.5;">
+      <div class="tag d">D · Summary（report.summary，markdown）</div>
+      <b>Moderate, AI-tilted portfolio.</b> 50% stocks led by NVDA and MSFT, 25% blue-chip crypto, 25% gold as a hedge. Round 1 was rejected because a 40% crypto weight produced a −41% drawdown; round 2 cut crypto to 25% and added LLY, bringing drawdown to −29.6% while still beating the S&amp;P 500 over 5 years.
+    </div>
+
+    <div style="display:grid; grid-template-columns: 360px 190px 1fr; gap:18px; margin-top:22px; align-items:stretch;">
+      <!-- round 1 -->
+      <div class="box bg-red" style="padding:14px 14px; opacity:.92;">
+        <div class="tag d">D · RoundCard R1（灰掉 + 驳回原因）</div>
+        <div style="display:flex; justify-content:space-between; align-items:center;"><div class="label" style="margin:0;">Round 1</div><b class="red" style="font-size:15px;">✕ Rejected</b></div>
+        <svg id="pie1" width="100%" height="300" viewBox="0 0 330 300" style="filter:grayscale(.75); opacity:.7;"></svg>
+        <div style="font-size:13px; line-height:1.55;">
+          <span class="red">✕</span> Max drawdown <b>−41.3%</b> (limit −35%)<br>
+          <span class="green">✓</span> Weights sum to 100% &nbsp; <span class="green">✓</span> Max holding ≤ 25%<br>
+          <span class="green">✓</span> Sandbox 118.4% vs independent 118.2%
+        </div>
+        <div style="margin-top:8px; padding:7px 9px; background:#fff; border:1.5px solid #d62828; border-radius:6px; font-size:13px;">
+          <b class="red">Verifier:</b> Cut crypto below 30% · Add a low-correlation equity
+        </div>
+      </div>
+
+      <!-- diff -->
+      <div class="box" style="padding:14px 12px; display:flex; flex-direction:column; justify-content:center; font-size:14px; line-height:1.9;">
+        <div class="tag d">D · RoundDiff</div>
+        <div class="label" style="text-align:center;">What changed</div>
+        <div><span class="c-crypto">●</span> Crypto <s class="muted">40%</s> → <b>25%</b></div>
+        <div><span class="c-stocks">●</span> Stocks <s class="muted">35%</s> → <b>50%</b></div>
+        <div style="padding-left:16px;">SOL <s class="muted">6%</s> → <b>3%</b></div>
+        <div style="padding-left:16px;"><b class="green">+ LLY 7%</b></div>
+        <div style="border-top:1px solid #eee; margin-top:6px; padding-top:6px;">Max DD <s class="muted">−41.3%</s> → <b class="green">−29.6%</b></div>
+        <div>Sharpe <s class="muted">0.61</s> → <b class="green">0.74</b></div>
+        <div>Return <s class="muted">118%</s> → <b>96%</b></div>
+        <div style="text-align:center; font-size:26px; color:#bbb; margin-top:4px;">→</div>
+      </div>
+
+      <!-- round 2 -->
+      <div class="box bg-green" style="padding:14px 16px;">
+        <div class="tag d">D · Sunburst R2（Recharts 两层 Pie：内圈资产类别，外圈持仓）</div>
+        <div style="display:flex; justify-content:space-between; align-items:center;"><div class="label" style="margin:0;">Round 2 · final</div><b class="green" style="font-size:15px;">✓ Approved</b></div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <svg id="pie2" width="400" height="400" viewBox="0 0 400 400"></svg>
+          <div style="font-size:14px; line-height:1.7; flex:1;">
+            <div><span class="dot" style="background:#2f5bea"></span><b>Stocks 50%</b> · $5,000</div>
+            <div class="muted" style="padding-left:14px; font-size:13px;">NVDA 14 · MSFT 12 · AVGO 9 · TSM 8 · LLY 7</div>
+            <div style="margin-top:6px;"><span class="dot" style="background:#7c4dff"></span><b>Crypto 25%</b> · $2,500</div>
+            <div class="muted" style="padding-left:14px; font-size:13px;">BTC 15 · ETH 7 · SOL 3</div>
+            <div style="margin-top:6px;"><span class="dot" style="background:#c9a227"></span><b>Gold 25%</b> · $2,500</div>
+            <div class="muted" style="padding-left:14px; font-size:13px;">GLD 25</div>
+            <div style="margin-top:12px; font-size:13px; line-height:1.55;">
+              <span class="green">✓</span> Max drawdown −29.6% (limit −35%)<br>
+              <span class="green">✓</span> Weights 100% &nbsp;<span class="green">✓</span> Max holding 25%<br>
+              <span class="green">✓</span> Sandbox 96.2% vs independent 96.0%
+            </div>
+          </div>
+        </div>
+        <div class="muted" style="font-size:12px; margin-top:4px;">悬停外圈 → 持仓名 + % + $；点击 → 跳到 ④ 的证据面板</div>
+      </div>
+    </div>
+
+    <div class="footer">Educational demo only. Not financial advice. Backtests use historical data and do not predict future returns.</div>
+    <div class="legend"><span><i style="background:#e63946"></i>C 负责</span><span><i style="background:#1d6fe0"></i>D 负责</span></div>
+  </div>
+</div>
+
+<!-- ========================= SCREEN 4 : RESULTS — HOLDINGS, EVIDENCE, BACKTEST ========================= -->
+<div class="screen" id="s4">
+  <div class="title-bar"><b>④</b> 结果页（下半）— 持仓表 + 点击看证据（findingIds → findings + 来源链接）+ 回测（4 条曲线）+ crossCheck 徽章 + 免责声明</div>
+  <div class="app">
+    <div style="display:grid; grid-template-columns: 1.55fr 1fr; gap:20px;">
+      <!-- holdings -->
+      <div class="box" style="padding:12px 14px;">
+        <div class="tag d">D · HoldingsTable（按资产类别分组，数字直接用后端的，不在前端重算）</div>
+        <table style="font-size:13.5px;">
+          <tr class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:1px;">
+            <th style="padding:4px 0;">Symbol</th><th>Name</th><th style="text-align:right;">%</th><th style="text-align:right;">$</th><th style="text-align:center; padding-left:14px;">Fin</th><th style="text-align:center; padding-left:10px;">Sent.</th><th style="padding-left:12px;">Why</th>
+          </tr>
+          <tbody id="holdings"></tbody>
+        </table>
+      </div>
+
+      <!-- evidence -->
+      <div class="box" style="padding:12px 16px; border-color:#2f5bea;">
+        <div class="tag d">D · EvidencePanel（点中某行后显示）</div>
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+          <div style="font-size:20px; font-weight:800;">NVDA <span class="muted" style="font-size:14px; font-weight:500;">NVIDIA Corp.</span></div>
+          <b>14% · $1,400</b>
+        </div>
+        <div style="font-size:14px; margin-top:6px; line-height:1.45;">Dominant AI accelerator share; data-center revenue still compounding.</div>
+        <div style="font-size:12px; margin-top:6px;" class="muted">Financial score <b style="color:#111;">8/10</b> · Sentiment <b class="green">+0.6</b></div>
+        <div class="label" style="margin-top:12px;">Evidence · 3 findings</div>
+        <div style="font-size:13px; line-height:1.45;">
+          <div style="padding:7px 0; border-top:1px solid #eee;"><b>DISCOVERY</b> <span class="green">▲</span> Largest share of AI data-center accelerator spend.<br><a style="color:#2f5bea;">↗ AI chip market share</a></div>
+          <div style="padding:7px 0; border-top:1px solid #eee;"><b>FINANCIALS</b> <span class="green">▲</span> Revenue +94% YoY, 55% operating margin, net cash; P/E 48x is rich.<br><span class="muted">from financial statements (no link)</span></div>
+          <div style="padding:7px 0; border-top:1px solid #eee;"><b>NEWS</b> <span class="green">▲</span> New-generation GPU shipping ahead of schedule.<br><a style="color:#2f5bea;">↗ NVDA launch news</a></div>
+        </div>
+      </div>
     </div>
 
     <div style="display:grid; grid-template-columns: 1.55fr 1fr; gap:20px; margin-top:22px;">
-      <!-- LEFT: chart + metrics -->
-      <div>
-        <div class="box" style="padding:14px 16px; height:300px;">
-          <div class="tag d">D · EquityChart 收益曲线（Recharts）</div>
-          <div style="display:flex; justify-content:space-between;"><div class="label">Equity curve</div>
-            <div style="font-size:12px;"><span style="color:#111; font-weight:700;">━ Strategy</span> &nbsp; <span style="color:#999; font-weight:700;">┅ Buy &amp; hold</span></div></div>
-          <svg id="chart" width="100%" height="240" viewBox="0 0 700 240"></svg>
-        </div>
-
-        <div class="box" style="padding:14px 16px; margin-top:22px;">
-          <div class="tag d">D · MetricsTable 样本内 vs 样本外</div>
-          <table style="width:100%; border-collapse:collapse; font-size:15px;">
-            <tr style="color:#888; font-size:12px; text-transform:uppercase; letter-spacing:1px;"><td style="padding:4px 0;">Metric</td><td>In-sample</td><td>Out-of-sample</td></tr>
-            <tr><td style="padding:5px 0;">Sharpe</td><td><b>2.10</b></td><td><b class="red">0.12 ↓</b></td></tr>
-            <tr><td style="padding:5px 0;">CAGR</td><td>45%</td><td class="red">2%</td></tr>
-            <tr><td style="padding:5px 0;">Max drawdown</td><td>−12%</td><td class="red">−30%</td></tr>
-            <tr><td style="padding:5px 0;">Trades</td><td>40</td><td>15</td></tr>
-          </table>
-        </div>
-      </div>
-
-      <!-- RIGHT: verdict + audit -->
-      <div>
-        <div class="box bg-red" style="padding:16px 18px; display:flex; align-items:center; gap:18px; height:120px;">
-          <div class="tag d">D · VerdictBadge（左侧 TrustScore 环 = P1）</div>
-          <div style="width:84px; height:84px; border-radius:50%; border:9px dashed #d62828; display:flex; align-items:center; justify-content:center; font-size:26px; font-weight:800; opacity:0.45;" class="red">32</div>
-          <div><div style="font-size:30px; font-weight:800;" class="red">❌ No edge</div><div style="font-size:13px; color:#555;">No evidence this beats buy &amp; hold after fees.</div></div>
-        </div>
-
-        <div class="box" style="padding:14px 16px; margin-top:22px;">
-          <div class="tag d">D · AuditCard 审计（产品卖点）</div>
-          <div class="label">Audit</div>
-          <div style="font-size:14px; line-height:1.6; padding:8px 10px; background:#fff6d6; border-radius:6px;">
-            <b>⚠→✓ Look-ahead leak found &amp; fixed</b> (2 attempts)<br>
-            <span style="color:#666;">Original code used the full-history mean — future data.</span>
+      <!-- backtest chart -->
+      <div class="box" style="padding:12px 16px; height:300px;">
+        <div class="tag d">D · BacktestChart（equityCurve：$1 增长，每周一个点，4 条线）</div>
+        <div style="display:flex; justify-content:space-between;">
+          <div class="label">Growth of $1 · Oct 2021 – Oct 2026</div>
+          <div style="font-size:12px; font-weight:700;">
+            <span style="color:#111;">━ Portfolio</span> &nbsp; <span style="color:#999;">┅ S&amp;P 500</span> &nbsp; <span style="color:#7aa0c8;">┅ 60/40</span> &nbsp; <span style="color:#c9a6a6;">┅ Equal weight</span>
           </div>
-          <div style="font-size:14px; margin-top:12px;"><b>Out-of-sample Sharpe · 95% CI</b></div>
-          <svg width="100%" height="58" viewBox="0 0 360 58">
-            <line x1="20" y1="30" x2="340" y2="30" stroke="#ccc" stroke-width="2"/>
-            <line x1="150" y1="10" x2="150" y2="50" stroke="#111" stroke-width="2" stroke-dasharray="4 3"/>
-            <text x="150" y="8" font-size="11" text-anchor="middle" fill="#111">0</text>
-            <line x1="86" y1="30" x2="246" y2="30" stroke="#d62828" stroke-width="8" stroke-linecap="round"/>
-            <circle cx="166" cy="30" r="7" fill="#fff" stroke="#d62828" stroke-width="3"/>
-            <text x="86" y="54" font-size="11" text-anchor="middle" fill="#d62828">−0.4</text>
-            <text x="246" y="54" font-size="11" text-anchor="middle" fill="#d62828">0.6</text>
-          </svg>
-          <div style="font-size:12px; color:#666;">Interval crosses 0 → can't distinguish from luck.</div>
-          <div style="font-size:14px; margin-top:10px;">✓ Fees 10 bps applied &nbsp; ✓ 70/30 split</div>
         </div>
+        <svg id="chart" width="100%" height="240" viewBox="0 0 700 240"></svg>
+      </div>
 
-        <div class="box" style="padding:10px 16px; margin-top:22px; display:flex; justify-content:space-between; align-items:center;">
-          <div class="tag d">D · CodePanel 生成的代码（折叠）</div>
-          <span style="font-family:monospace; font-size:13px; color:#555;">def signals(df) -&gt; pd.Series: …</span><span style="font-size:13px;">▸ Show code</span>
+      <!-- metrics -->
+      <div class="box" style="padding:12px 16px;">
+        <div class="tag d">D · MetricsTable + VerifiedBadge（crossCheck.isMatch）</div>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <div class="label" style="margin:0;">Backtest</div>
+          <span class="bg-green" style="border:1.5px solid; border-radius:999px; padding:2px 10px; font-size:12px;"><b class="green">✓ Verified</b> <span class="muted">sandbox 96.2% vs ours 96.0%</span></span>
         </div>
+        <table style="font-size:13.5px;">
+          <tr class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:1px;"><th style="padding:4px 0;"></th><th style="text-align:right;">Portfolio</th><th style="text-align:right;">S&amp;P</th><th style="text-align:right;">60/40</th><th style="text-align:right;">Eq.wt</th></tr>
+          <tr><td style="padding:5px 0;">Total return</td><td style="text-align:right;"><b>96.2%</b></td><td style="text-align:right;">78.5%</td><td style="text-align:right;">34.1%</td><td style="text-align:right;">71.0%</td></tr>
+          <tr><td style="padding:5px 0;">CAGR</td><td style="text-align:right;"><b>14.4%</b></td><td style="text-align:right;">12.3%</td><td style="text-align:right;">6.0%</td><td style="text-align:right;">11.3%</td></tr>
+          <tr><td style="padding:5px 0;">Volatility</td><td style="text-align:right;"><b>22.1%</b></td><td style="text-align:right;">17.4%</td><td style="text-align:right;">11.8%</td><td style="text-align:right;">19.6%</td></tr>
+          <tr><td style="padding:5px 0;">Sharpe</td><td style="text-align:right;"><b>0.74</b></td><td style="text-align:right;">0.63</td><td style="text-align:right;">0.39</td><td style="text-align:right;">0.52</td></tr>
+          <tr><td style="padding:5px 0;">Max drawdown</td><td style="text-align:right;"><b>−29.6%</b></td><td style="text-align:right;">−24.5%</td><td style="text-align:right;">−21.1%</td><td style="text-align:right;">−30.2%</td></tr>
+          <tr><td style="padding:5px 0;">Worst month</td><td style="text-align:right;"><b>−11.9%</b></td><td style="text-align:right;">−9.2%</td><td style="text-align:right;">−7.0%</td><td style="text-align:right;">−10.4%</td></tr>
+        </table>
+        <div class="muted" style="font-size:11px; margin-top:6px;">Backtest applies today's weights to past prices.</div>
       </div>
     </div>
 
-    <!-- refine (P1) -->
-    <div class="box p1" style="margin-top:22px; padding:12px 16px; display:flex; gap:12px; align-items:center;">
-      <div class="tag" style="background:#888;">P1 · RefineInput（新结果直接替换旧结果，无版本切换）</div>
-      <div style="flex:1; border:2px solid #ddd; border-radius:8px; padding:9px 12px; color:#aaa; font-size:15px;">Refine: “only trade when price is above the 200-day average” …</div>
-      <span class="btn primary" style="opacity:0.45;">Refine →</span>
+    <div class="box" style="margin-top:16px; padding:8px 14px; font-size:13px; background:#f4f4f6;">
+      <div class="tag d">D · Disclaimer（report.disclaimer，必须显示）</div>
+      Educational demo only. Not financial advice. Backtests use historical data and do not predict future returns.
     </div>
-    <div style="position:absolute; bottom:8px; left:28px; font-size:11px; color:#999;">Not investment advice · Data: Binance via ccxt, Yahoo Finance</div>
-    <div class="legend"><span><i style="background:#e63946"></i>C 负责</span><span><i style="background:#1d6fe0"></i>D 负责</span><span><i class="dash"></i>P1（有时间再做）</span></div>
+    <div class="legend"><span><i style="background:#e63946"></i>C 负责</span><span><i style="background:#1d6fe0"></i>D 负责</span></div>
   </div>
 </div>
 
 <script>
-// deterministic pseudo-random
-let seed = 7; function rnd(){ seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+// ---------- data (docs/fixtures/report.example.json) ----------
+const CLASS = { STOCKS: '#2f5bea', CRYPTO: '#7c4dff', GOLD: '#c9a227' };
+const R1 = [
+  { c: 'STOCKS', w: 35, h: [['NVDA', 12], ['MSFT', 10], ['AVGO', 8], ['TSM', 5]] },
+  { c: 'CRYPTO', w: 40, h: [['BTC', 22], ['ETH', 12], ['SOL', 6]] },
+  { c: 'GOLD', w: 25, h: [['GLD', 25]] },
+];
+const R2 = [
+  { c: 'STOCKS', w: 50, h: [['NVDA', 14], ['MSFT', 12], ['AVGO', 9], ['TSM', 8], ['LLY', 7]] },
+  { c: 'CRYPTO', w: 25, h: [['BTC', 15], ['ETH', 7], ['SOL', 3]] },
+  { c: 'GOLD', w: 25, h: [['GLD', 25]] },
+];
 
-// equity chart
-(function(){
-  const svg = document.getElementById('chart'), W = 700, H = 240, N = 140, split = 98;
-  let s = 1, b = 1; const S = [], B = [];
-  for (let i = 0; i < N; i++) {
-    const m = (rnd() - 0.47) * 0.06;
-    b *= 1 + m;
-    s *= 1 + (i < split ? Math.abs(m) * 0.9 + 0.004 : m * 0.8 - 0.002);
-    S.push(s); B.push(b);
+// lighten a hex colour by t (0..1) towards white — holdings are shades of their class colour
+function shade(hex, t) {
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255;
+  const m = v => Math.round(v + (255 - v) * t);
+  return `rgb(${m(r)},${m(g)},${m(b)})`;
+}
+function arc(cx, cy, r0, r1, a0, a1) {
+  const p = (r, a) => [cx + r * Math.cos(a), cy + r * Math.sin(a)].map(v => v.toFixed(1)).join(' ');
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  return `M${p(r1, a0)} A${r1} ${r1} 0 ${large} 1 ${p(r1, a1)} L${p(r0, a1)} A${r0} ${r0} 0 ${large} 0 ${p(r0, a0)} Z`;
+}
+function sunburst(id, slices, cx, cy, scale) {
+  const svg = document.getElementById(id);
+  const rIn = [0.18, 0.42].map(v => v * scale), rOut = [0.47, 0.78].map(v => v * scale);
+  let out = '', a = -Math.PI / 2;
+  const deg = w => (w / 100) * 2 * Math.PI;
+  for (const s of slices) {
+    const a1 = a + deg(s.w), mid = (a + a1) / 2;
+    out += `<path d="${arc(cx, cy, rIn[0], rIn[1], a, a1)}" fill="${CLASS[s.c]}" stroke="#fff" stroke-width="2"/>`;
+    const lr = (rIn[0] + rIn[1]) / 2;
+    out += `<text x="${cx + lr * Math.cos(mid)}" y="${cy + lr * Math.sin(mid) + 4}" font-size="${scale > 200 ? 13 : 11}" font-weight="800" fill="#fff" text-anchor="middle">${s.w}%</text>`;
+    let b = a;
+    s.h.forEach(([sym, w], i) => {
+      const b1 = b + deg(w), m = (b + b1) / 2;
+      out += `<path d="${arc(cx, cy, rOut[0], rOut[1], b, b1)}" fill="${shade(CLASS[s.c], 0.15 + i * 0.17)}" stroke="#fff" stroke-width="2"/>`;
+      if (w >= 5) {
+        const tr = (rOut[0] + rOut[1]) / 2;
+        out += `<text x="${cx + tr * Math.cos(m)}" y="${cy + tr * Math.sin(m) + 4}" font-size="${scale > 200 ? 12 : 10}" font-weight="700" fill="#fff" text-anchor="middle">${sym}</text>`;
+      }
+      b = b1;
+    });
+    a = a1;
   }
-  const all = S.concat(B), mx = Math.max(...all), mn = Math.min(...all);
-  const x = i => 30 + i * (W - 40) / (N - 1), y = v => H - 22 - (v - mn) / (mx - mn) * (H - 40);
+  svg.innerHTML = out;
+}
+sunburst('pie1', R1, 165, 150, 180);
+sunburst('pie2', R2, 200, 200, 250);
+
+// ---------- findings feed (screen 2), newest first ----------
+const FINDINGS = [
+  ['SOCIAL', 'SOL-USD', 'P', 'Very strong retail momentum — historically precedes high volatility.', 'SOL sentiment'],
+  ['SOCIAL', 'ETH-USD', 'N', 'Mixed sentiment; L2 fee debate ongoing.', 'ETH sentiment'],
+  ['NEWS', 'GLD', 'P', 'Central banks continue record gold buying.', 'Central bank gold'],
+  ['NEWS', 'TSM', 'X', 'Export-control headlines add geopolitical risk.', 'Export controls'],
+  ['SOCIAL', 'BTC-USD', 'P', 'Reddit/X sentiment bullish but not euphoric.', 'BTC sentiment'],
+  ['NEWS', 'NVDA', 'P', 'New-generation GPU shipping ahead of schedule.', 'NVDA launch news'],
+  ['LANDSCAPE', 'LLY', 'P', 'Duopoly with Novo Nordisk in obesity drugs; low correlation to semis.', 'GLP-1 market'],
+  ['FINANCIALS', 'AVGO', 'N', 'High debt from VMware deal, but FCF covers it 3x.', null],
+  ['FINANCIALS', 'NVDA', 'P', 'Revenue +94% YoY, 55% operating margin, net cash; P/E 48x is rich.', null],
+  ['DISCOVERY', 'NVDA', 'P', 'Largest share of AI data-center accelerator spend.', 'AI chip market share'],
+];
+const SENT = { P: ['▲', '#1a8f4c'], N: ['●', '#999'], X: ['▼', '#d62828'] };
+document.getElementById('feed').innerHTML = FINDINGS.map(([ag, sym, s, claim, src], i) =>
+  `<div style="padding:8px 0; border-top:1px solid #eee; ${i === 0 ? 'background:#fffbe6; margin:0 -6px; padding:8px 6px; border-radius:6px;' : ''}">
+     <div style="font-size:11px; font-weight:800; letter-spacing:.5px; color:#666;">${ag} · <span style="color:#111;">${sym}</span> <span style="color:${SENT[s][1]};">${SENT[s][0]}</span>${i === 0 ? ' <span style="color:#b88a00;">NEW</span>' : ''}</div>
+     <div>${claim}</div>
+     ${src ? `<div style="font-size:12px; color:#2f5bea;">↗ ${src}</div>` : ''}
+   </div>`).join('');
+
+// ---------- holdings table (screen 4) ----------
+const H = [
+  ['STOCKS', 'NVDA', 'NVIDIA Corp.', 14, 1400, 8, 0.6, 'Dominant AI accelerator share; data-center revenue…'],
+  ['STOCKS', 'MSFT', 'Microsoft Corp.', 12, 1200, 9, 0.4, 'Azure AI demand plus fortress balance sheet.'],
+  ['STOCKS', 'AVGO', 'Broadcom Inc.', 9, 900, 7, 0.3, 'Custom AI silicon and networking backlog.'],
+  ['STOCKS', 'TSM', 'Taiwan Semiconductor', 8, 800, 8, 0.2, 'Sole leading-edge foundry; geopolitical risk sized…'],
+  ['STOCKS', 'LLY', 'Eli Lilly', 7, 700, 8, 0.5, 'Added in round 2 as a low-correlation diversifier.'],
+  ['CRYPTO', 'BTC-USD', 'Bitcoin', 15, 1500, null, 0.5, 'ETF inflows and institutional adoption.'],
+  ['CRYPTO', 'ETH-USD', 'Ethereum', 7, 700, null, 0.2, 'Staking yield and L2 activity.'],
+  ['CRYPTO', 'SOL-USD', 'Solana', 3, 300, null, 0.7, 'Cut from 6% after Verifier flagged drawdown risk.'],
+  ['GOLD', 'GLD', 'SPDR Gold Shares', 25, 2500, null, 0.1, 'Hedge against equity/crypto drawdowns.'],
+];
+let last = '';
+document.getElementById('holdings').innerHTML = H.map(([c, sym, name, w, usd, fin, sent, why]) => {
+  const head = c !== last ? `<tr><td colspan="7" style="padding:7px 0 2px; font-size:11px; font-weight:800; letter-spacing:1px; color:${CLASS[c]};">${c}</td></tr>` : '';
+  last = c;
+  const sel = sym === 'NVDA' ? 'background:#eef2fe; outline:2px solid #2f5bea;' : '';
+  return head + `<tr style="border-top:1px solid #f0f0f0; ${sel}">
+    <td style="padding:4px 0;"><span class="dot" style="background:${CLASS[c]}"></span><b>${sym}</b></td>
+    <td>${name}</td><td style="text-align:right;"><b>${w}%</b></td><td style="text-align:right;">$${usd.toLocaleString()}</td>
+    <td style="text-align:center; padding-left:14px;">${fin ?? '—'}</td>
+    <td style="text-align:center; padding-left:10px; color:${sent >= 0.3 ? '#1a8f4c' : '#888'};">${sent > 0 ? '+' : ''}${sent.toFixed(1)}</td>
+    <td style="padding-left:12px; color:#555; font-size:12.5px;">${why}</td></tr>`;
+}).join('');
+
+// ---------- backtest chart (screen 4): growth of $1, pinned to the fixture's total returns ----------
+let seed = 7; function rnd() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+(function () {
+  const svg = document.getElementById('chart'), W = 700, H = 240, N = 130;
+  const series = [
+    { end: 1.962, vol: 0.045, color: '#111', w: 3, dash: '' },
+    { end: 1.785, vol: 0.025, color: '#999', w: 2.5, dash: '6 4' },
+    { end: 1.341, vol: 0.016, color: '#7aa0c8', w: 2.5, dash: '6 4' },
+    { end: 1.710, vol: 0.03, color: '#c9a6a6', w: 2.5, dash: '6 4' },
+  ].map(s => {
+    const noise = [0]; for (let i = 1; i < N; i++) noise.push(noise[i - 1] + (rnd() - 0.5) * s.vol * 2);
+    const target = Math.log(s.end);
+    return { ...s, v: noise.map((x, i) => Math.exp(x + (target - noise[N - 1]) * i / (N - 1))) };
+  });
+  const all = series.flatMap(s => s.v), mx = Math.max(...all), mn = Math.min(...all, 0.8);
+  const x = i => 40 + i * (W - 50) / (N - 1), y = v => H - 22 - (v - mn) / (mx - mn) * (H - 34);
   const path = arr => arr.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1)).join(' ');
-  svg.innerHTML =
-    `<rect x="${x(split)}" y="0" width="${W - 10 - x(split)}" height="${H - 18}" fill="#f2f2f5"/>` +
-    `<line x1="${x(split)}" y1="0" x2="${x(split)}" y2="${H - 18}" stroke="#888" stroke-dasharray="5 4"/>` +
-    `<text x="${x(split) - 8}" y="16" font-size="12" text-anchor="end" fill="#666">IN-SAMPLE</text>` +
-    `<text x="${x(split) + 8}" y="16" font-size="12" fill="#666">OUT-OF-SAMPLE</text>` +
-    `<line x1="30" y1="${H - 18}" x2="${W - 10}" y2="${H - 18}" stroke="#ccc"/>` +
-    `<path d="${path(B)}" fill="none" stroke="#aaa" stroke-width="2.5" stroke-dasharray="6 4"/>` +
-    `<path d="${path(S)}" fill="none" stroke="#111" stroke-width="3"/>` +
-    `<text x="30" y="${H - 4}" font-size="11" fill="#999">2021</text><text x="${W - 10}" y="${H - 4}" font-size="11" text-anchor="end" fill="#999">2026</text>`;
+  let out = `<line x1="40" y1="${H - 18}" x2="${W - 10}" y2="${H - 18}" stroke="#ccc"/>`;
+  for (const t of [1, 1.5, 2]) out += `<line x1="40" y1="${y(t)}" x2="${W - 10}" y2="${y(t)}" stroke="#f0f0f0"/><text x="34" y="${y(t) + 4}" font-size="11" text-anchor="end" fill="#999">$${t.toFixed(2)}</text>`;
+  for (const s of series.slice().reverse()) out += `<path d="${path(s.v)}" fill="none" stroke="${s.color}" stroke-width="${s.w}" stroke-dasharray="${s.dash}"/>`;
+  ['2022', '2023', '2024', '2025', '2026'].forEach((yr, i) => { out += `<text x="${x(Math.round((i + 0.2) * N / 5))}" y="${H - 4}" font-size="11" fill="#999" text-anchor="middle">${yr}</text>`; });
+  svg.innerHTML = out;
 })();
 </script>
 </body>
