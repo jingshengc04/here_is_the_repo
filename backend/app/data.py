@@ -39,6 +39,19 @@ FUNDAMENTALS_CACHE_FRESH_SECONDS = 24 * 3600
 ETF_SYMBOLS = {"GLD", "SPY", "AGG"}
 
 
+SEC_FIELDS = [
+    "revenue",
+    "gross_profit",
+    "operating_income",
+    "net_income",
+    "total_debt",
+    "cash",
+    "cfo",
+    "capex",
+    "shares_diluted",
+]
+
+
 def is_crypto(symbol: str) -> bool:
     """Return True if symbol is crypto (ends with -USD and isn't an equity)."""
     return symbol.strip().upper().endswith("-USD")
@@ -204,12 +217,102 @@ def resolve(symbol: str) -> bool:
         return False
 
 
-def fundamentals(symbol: str) -> dict[str, Any]:
+def _fetch_fundamentals(symbol: str) -> dict[str, Any]:
+    sym = symbol.strip().upper()
+    clean_sym = sym[:-3] if sym.endswith(".US") else sym
+
+    end_d = pd.Timestamp.now().strftime("%Y-%m-%d")
+    start_d = (pd.Timestamp.now() - pd.DateOffset(years=2)).strftime("%Y-%m-%d")
+
+    from backtest.loaders.fundamentals_loader import load_fundamental_panel
+    import yfinance as yf
+
+    panel = load_fundamental_panel([clean_sym], SEC_FIELDS, start_d, end_d, freq="ttm")
+
+    result: dict[str, Any] = {field: None for field in SEC_FIELDS}
+    as_of = None
+    for field in SEC_FIELDS:
+        df_field = panel.get(field)
+        if df_field is not None and clean_sym in df_field.columns:
+            series = df_field[clean_sym].dropna()
+            if not series.empty:
+                val = series.iloc[-1]
+                if pd.notna(val):
+                    result[field] = float(val)
+                as_of = series.index[-1].strftime("%Y-%m-%d")
+
+    result["asOf"] = as_of or pd.Timestamp.now().strftime("%Y-%m-%d")
+
+    # yfinance valuation fields
+    try:
+        ticker = yf.Ticker(clean_sym)
+        info = getattr(ticker, "info", None) or {}
+        pe = info.get("trailingPE")
+        result["trailingPE"] = float(pe) if pe is not None and pd.notna(pe) else None
+        mc = info.get("marketCap")
+        result["marketCap"] = int(mc) if mc is not None and pd.notna(mc) else None
+        cp = info.get("currentPrice")
+        result["currentPrice"] = float(cp) if cp is not None and pd.notna(cp) else None
+    except Exception as exc:
+        logger.warning("Failed loading yfinance info for %s: %s", clean_sym, exc)
+        result["trailingPE"] = None
+        result["marketCap"] = None
+        result["currentPrice"] = None
+
+    return result
+
+
+def fundamentals(symbol: str, force_refresh: bool = False) -> dict[str, Any]:
     """Return fundamental metrics for symbol.
 
     Returns {} immediately for crypto and ETFs (GLD/SPY/AGG).
+    Caches to backend/data/cache/fundamentals/{symbol}.json (valid for 24h).
     """
     sym = symbol.strip().upper()
     if is_crypto(sym) or is_etf(sym):
         return {}
-    raise NotImplementedError
+
+    cache_path = FUNDAMENTALS_CACHE_DIR / f"{sym}.json"
+
+    if not force_refresh and cache_path.exists():
+        try:
+            age = time.time() - os.path.getmtime(cache_path)
+            if age < FUNDAMENTALS_CACHE_FRESH_SECONDS:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception as exc:
+            logger.warning("Failed reading fundamentals cache for %s: %s", sym, exc)
+
+    # Attempt live fetch
+    try:
+        data = _fetch_fundamentals(sym)
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as write_exc:
+            logger.warning("Failed writing fundamentals cache for %s: %s", sym, write_exc)
+        return data
+    except Exception as exc:
+        if cache_path.exists():
+            logger.warning("Live fundamentals fetch failed for %s (%s); using stale cache", sym, exc)
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as read_exc:
+                logger.error("Failed reading stale fundamentals cache for %s: %s", sym, read_exc)
+        logger.warning("Live fundamentals fetch failed for %s (%s) and no cache exists", sym, exc)
+        return {
+            "revenue": None,
+            "gross_profit": None,
+            "operating_income": None,
+            "net_income": None,
+            "total_debt": None,
+            "cash": None,
+            "cfo": None,
+            "capex": None,
+            "shares_diluted": None,
+            "trailingPE": None,
+            "marketCap": None,
+            "currentPrice": None,
+            "asOf": pd.Timestamp.now().strftime("%Y-%m-%d"),
+        }

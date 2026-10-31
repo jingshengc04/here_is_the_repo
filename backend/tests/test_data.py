@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from app.data import (
+    FUNDAMENTALS_CACHE_DIR,
     PRICES_CACHE_DIR,
     fundamentals,
     is_crypto,
@@ -193,3 +194,97 @@ def test_resolve(tmp_path, monkeypatch):
     # 3. Live fetch fails / empty
     with patch("backtest.loaders.yfinance_loader.DataLoader.fetch", return_value={}):
         assert resolve("UNKNOWN") is False
+
+
+def test_fundamentals_stock_fields(tmp_path, monkeypatch):
+    """fundamentals(symbol) returns SEC TTM fields + yfinance valuation fields, caching to JSON."""
+    cache_dir = tmp_path / "fundamentals"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.data.FUNDAMENTALS_CACHE_DIR", cache_dir)
+
+    dates = pd.date_range("2024-01-01", periods=10, freq="B")
+    mock_panel = {
+        "revenue": pd.DataFrame({"NVDA": [300.0e9] * 10}, index=dates),
+        "gross_profit": pd.DataFrame({"NVDA": [220.0e9] * 10}, index=dates),
+        "operating_income": pd.DataFrame({"NVDA": [180.0e9] * 10}, index=dates),
+        "net_income": pd.DataFrame({"NVDA": [150.0e9] * 10}, index=dates),
+        "total_debt": pd.DataFrame({"NVDA": [10.0e9] * 10}, index=dates),
+        "cash": pd.DataFrame({"NVDA": [35.0e9] * 10}, index=dates),
+        "cfo": pd.DataFrame({"NVDA": [160.0e9] * 10}, index=dates),
+        "capex": pd.DataFrame({"NVDA": [15.0e9] * 10}, index=dates),
+        "shares_diluted": pd.DataFrame({"NVDA": [24.5e9] * 10}, index=dates),
+    }
+
+    mock_ticker = MagicMock()
+    mock_ticker.info = {
+        "trailingPE": 25.87,
+        "marketCap": 4941441662976,
+        "currentPrice": 204.64,
+    }
+
+    with patch("backtest.loaders.fundamentals_loader.load_fundamental_panel", return_value=mock_panel), \
+         patch("yfinance.Ticker", return_value=mock_ticker):
+
+        res = fundamentals("NVDA")
+
+        # Verify SEC fields
+        assert res["revenue"] == 300.0e9
+        assert res["gross_profit"] == 220.0e9
+        assert res["operating_income"] == 180.0e9
+        assert res["net_income"] == 150.0e9
+        assert res["total_debt"] == 10.0e9
+        assert res["cash"] == 35.0e9
+        assert res["cfo"] == 160.0e9
+        assert res["capex"] == 15.0e9
+        assert res["shares_diluted"] == 24.5e9
+
+        # Verify valuation fields
+        assert res["trailingPE"] == 25.87
+        assert res["marketCap"] == 4941441662976
+        assert res["currentPrice"] == 204.64
+        assert "asOf" in res
+        assert res["asOf"] is not None
+
+        # Verify JSON cache exists
+        json_path = cache_dir / "NVDA.json"
+        assert json_path.exists()
+
+
+def test_fundamentals_stale_cache_used_when_live_fetch_raises(tmp_path, monkeypatch):
+    """When fundamentals cache is older than 24h and live fetch raises, use stale cache."""
+    import json
+
+    cache_dir = tmp_path / "fundamentals"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.data.FUNDAMENTALS_CACHE_DIR", cache_dir)
+
+    cached_data = {
+        "revenue": 300.0e9,
+        "gross_profit": 220.0e9,
+        "operating_income": 180.0e9,
+        "net_income": 150.0e9,
+        "total_debt": 10.0e9,
+        "cash": 35.0e9,
+        "cfo": 160.0e9,
+        "capex": 15.0e9,
+        "shares_diluted": 24.5e9,
+        "trailingPE": 25.87,
+        "marketCap": 4941441662976,
+        "currentPrice": 204.64,
+        "asOf": "2024-01-12",
+    }
+    json_path = cache_dir / "NVDA.json"
+    with open(json_path, "w") as f:
+        json.dump(cached_data, f)
+
+    # Set mtime to 30 hours ago (stale)
+    stale_time = time.time() - (30 * 3600)
+    os.utime(json_path, (stale_time, stale_time))
+
+    fail_panel = MagicMock(side_effect=RuntimeError("SEC EDGAR unreachable"))
+
+    with patch("backtest.loaders.fundamentals_loader.load_fundamental_panel", fail_panel):
+        res = fundamentals("NVDA")
+        assert res["revenue"] == 300.0e9
+        assert res["trailingPE"] == 25.87
+
