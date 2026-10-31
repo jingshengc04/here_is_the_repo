@@ -3,6 +3,7 @@
 This is the FAKE: it replays app/fixtures/report.example.json as a realistic event sequence.
 """
 import asyncio
+import importlib
 import json
 import os
 import time
@@ -140,7 +141,8 @@ async def research(intake: IntakeInput, emit: Emit) -> tuple[list[Candidate], li
 
 
 async def run_real(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
-    from . import decide  # lazy: decide.py is built separately
+    # import_module (not `from . import`) so it honours sys.modules patches even after the real module was imported
+    decide = importlib.import_module("app.decide")
 
     await emit({"type": "run.started", "agents": ["DISCOVERY", *PARALLEL, "ORCHESTRATOR", "VERIFIER"]})
     cands, findings = await research(intake, emit)
