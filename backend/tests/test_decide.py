@@ -233,3 +233,100 @@ def test_progress_throttle_dedupes_and_rate_limits():
 
     asyncio.run(go())
     assert sent == ["Sandbox: executing Python", "Sandbox: result received"]
+
+
+# ---------- personalisation ----------
+from app.models import Preferences  # noqa: E402
+
+
+def _out(weights):
+    return decide.OrchestratorOut(
+        assetClasses=[],
+        holdings=[decide.HoldingOut(symbol=s, weightPct=w, rationale="r", findingIds=[]) for s, w in weights.items()])
+
+
+def _alloc(weights, prefs):
+    cands = {c.symbol: c for c in CANDS}
+    return decide._build_allocation(_out(weights), cands, FINDINGS, {}, 10000, prefs), cands
+
+
+def _w(alloc):
+    return {h.symbol: h.weightPct for s in alloc.slices for h in s.holdings}
+
+
+def test_exclude_enforced():
+    a, _ = _alloc({"NVDA": 30, "MSFT": 30, "ETH-USD": 20, "GLD": 20}, Preferences(exclude=["eth-usd"]))
+    w = _w(a)
+    assert "ETH-USD" not in w and round(sum(w.values()), 1) == 100.0
+
+
+def test_must_include_forced_at_least_1pct_and_sum_exact():
+    a, _ = _alloc({"NVDA": 25, "MSFT": 25, "BTC-USD": 25, "GLD": 25}, Preferences(mustInclude=["AAPL"]))
+    w = _w(a)
+    assert w["AAPL"] >= 1.0 and max(w.values()) <= 25.0 and round(sum(w.values()), 1) == 100.0
+
+
+def test_unresolvable_must_include_is_ignored():
+    a, _ = _alloc({"NVDA": 50, "MSFT": 50}, Preferences(mustInclude=["NOPE"]))
+    assert set(_w(a)) == {"NVDA", "MSFT"}
+
+
+def test_is_user_requested_copied_from_candidate():
+    cands = {c.symbol: c for c in CANDS}
+    cands["NVDA"] = cands["NVDA"].model_copy()
+    object.__setattr__(cands["NVDA"], "isUserRequested", True)
+    a = decide._build_allocation(_out({"NVDA": 50, "MSFT": 50}), cands, FINDINGS, {}, 10000, None)
+    flags = {h.symbol: h.isUserRequested for s in a.slices for h in s.holdings}
+    assert flags == {"NVDA": True, "MSFT": False}
+
+
+def _pref_check(weights, prefs, dd):
+    a, cands = _alloc(weights, prefs)
+    return decide._pref_check(prefs, a, cands, dd, -35.0)
+
+
+def test_class_target_passes_within_5pp():
+    c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 10, "BTC-USD": 22, "GLD": 18}, Preferences(assetClassTargets={"CRYPTO": 25}), -10)
+    assert c.isPassed, c.detail
+
+
+def test_class_target_fails_outside_5pp_when_drawdown_has_headroom():
+    c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 12, "GLD": 18},
+                    Preferences(assetClassTargets={"CRYPTO": 30}), -10)
+    assert not c.isPassed and "CRYPTO" in c.detail
+
+
+def test_class_target_underweight_explained_by_drawdown_limit_passes():
+    c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 12, "GLD": 18},
+                    Preferences(assetClassTargets={"CRYPTO": 30}), -33.0)
+    assert c.isPassed and "drawdown limit" in c.detail and "CRYPTO" in c.detail
+
+
+def test_overweight_never_explained_by_drawdown():
+    c = _pref_check({"NVDA": 20, "MSFT": 20, "AAPL": 10, "BTC-USD": 25, "ETH-USD": 5, "GLD": 20},
+                    Preferences(assetClassTargets={"CRYPTO": 10}), -34.0)
+    assert not c.isPassed
+
+
+def test_preference_notes_empty_without_prefs(fake):
+    rounds, _ = run()
+    assert decide.preference_notes(INTAKE, rounds) == []
+
+
+def test_full_run_with_preferences_notes_and_ninth_check(fake):
+    intake = INTAKE.model_copy(update={"preferences": Preferences(
+        mustInclude=["AAPL"], exclude=["TSLA"], assetClassTargets={"CRYPTO": 30})})
+    rounds = asyncio.run(decide.decide(intake, CANDS, FINDINGS, lambda e: None))
+    assert all(any(c.name == "User preferences respected" for c in r.verification.checks) for r in rounds)
+    assert "preferences (verbatim)" in fake["orch_inputs"][0] and "mustInclude" in fake["orch_inputs"][0]
+    notes = decide.preference_notes(intake, rounds)
+    assert any(n.startswith("AAPL included at") and n.endswith("as requested") for n in notes), notes
+    assert "TSLA excluded as requested" in notes
+    assert any(n.startswith("Crypto target 30% → ") and "drawdown limit" in n and "round 1 tried" in n for n in notes), notes
+
+
+def test_drawdown_failure_from_crypto_target_is_named_in_changes(fake):
+    intake = INTAKE.model_copy(update={"preferences": Preferences(assetClassTargets={"CRYPTO": 50})})
+    rounds = asyncio.run(decide.decide(intake, CANDS, FINDINGS, lambda e: None))
+    assert any("Your 50% CRYPTO target exceeds what a Moderate profile allows; reduce to ~" in c
+               for c in rounds[0].verification.changesRequested)
