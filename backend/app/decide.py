@@ -453,11 +453,12 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
             t_cry = (prefs.assetClassTargets or {}).get("CRYPTO") if prefs else None
             cur_cry = _class_weights(alloc).get("CRYPTO", 0.0)
             limit_dd = config.DRAWDOWN_LIMITS[risk]
+            aim_dd = limit_dd * 0.95  # aim 5% inside the limit so rounding/mix changes don't tip it over
             cap, up_hint = None, ""
             if not checks[0].isPassed:
-                cap = _crypto_cap(weights, cands, closes, limit_dd)
+                cap = _crypto_cap(weights, cands, closes, aim_dd)
             elif t_cry is not None and cur_cry < t_cry - 5:  # drawdown headroom: the target can be approached
-                up = _crypto_cap(weights, cands, closes, limit_dd, hi=t_cry)
+                up = _crypto_cap(weights, cands, closes, aim_dd, hi=t_cry)
                 if up and up[0] > cur_cry:
                     up_hint = (f"Computed by the backtest engine: you have drawdown headroom. Total CRYPTO can go up "
                                f"to about {up[0]}% (max drawdown ≈ {up[1]}%, limit {limit_dd:g}%) toward the user's "
