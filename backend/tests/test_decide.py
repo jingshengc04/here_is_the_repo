@@ -157,3 +157,8 @@ def test_round2_prompt_has_computed_crypto_cap(fake):
     p2 = fake["orch_inputs"][1]
     m = re.search(r"total CRYPTO at or below ([\d.]+)%.*?drawdown (?:of )?≈ (-[\d.]+)%", p2)
     assert m and float(m.group(1)) < 75 and float(m.group(2)) >= -35
+
+
+def test_cap_projection_zero_weight_free_slots():
+    out = decide.project([60.0, 40.0, 0.0, 0.0])
+    assert max(out) <= 25.0 and round(sum(out), 1) == 100.0

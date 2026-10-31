@@ -108,7 +108,7 @@ def project(w: list[float], cap: float | None = None) -> list[float]:
         for i in over:
             w[i] = cap
         for i in free:
-            w[i] += excess * w[i] / base
+            w[i] += excess * (w[i] / base if base > 0 else 1 / len(free))
     return normalise(w)
 
 
