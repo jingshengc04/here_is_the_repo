@@ -1,0 +1,70 @@
+import asyncio
+from itertools import count
+from types import SimpleNamespace
+
+from app import agents, data, llm
+from app.models import Candidate, IntakeInput
+
+INTAKE = IntakeInput(amountUsd=10000, horizonYears=2, riskTolerance="MODERATE", theme="AI")
+SRC = [{"title": f"t{i}", "url": f"http://x/{i}"} for i in range(5)]
+
+
+def fake_ask(payload):
+    async def ask(**kw):
+        return SimpleNamespace(data=payload, sources=SRC)
+    return ask
+
+
+def run(c):
+    return asyncio.run(c)
+
+
+def test_discovery_drops_unresolved_and_adds_gld(monkeypatch):
+    out = agents.DiscoveryOut(picks=[
+        agents.Pick(symbol="NVDA", name="Nvidia", assetClass="STOCKS", thesis="t", risk="r"),
+        agents.Pick(symbol="FAKE", name="Fake", assetClass="STOCKS", thesis="t", risk="r"),
+        agents.Pick(symbol="BTC-USD", name="Bitcoin", assetClass="CRYPTO", thesis="t", risk="r")])
+    monkeypatch.setattr(llm, "ask", fake_ask(out))
+    monkeypatch.setattr(data, "resolve", lambda s: s != "FAKE")
+    notes = []
+    cands, findings = run(agents.discovery(INTAKE, count(1), on_step=notes.append))
+    assert [c.symbol for c in cands] == ["NVDA", "BTC-USD", "GLD"]
+    assert cands[-1].assetClass == "GOLD"
+    assert any("FAKE" in n["message"] for n in notes)
+    assert len({f.id for f in findings}) == len(findings)
+    assert all(len(f.sources) <= 3 for f in findings)
+    assert {"NEGATIVE"} <= {f.sentiment for f in findings if f.symbol == "NVDA"}
+
+
+def test_number_gate():
+    f = {"revenue": 302.969e9, "net_income": 75e9, "trailingPE": 28.5}
+    assert agents.number_gate("Revenue: $303B", f) is True
+    assert agents.number_gate("Strong. Revenue: $250B, P/E: 28.5x", f) is False
+    assert agents.number_gate("Healthy balance sheet", f) is None
+
+
+def test_financials_gate_flags_bad_revenue(monkeypatch):
+    out = agents.FinancialsOut(stocks=[
+        agents.StockScore(symbol="AAPL", score=8, verdict="Solid.", keyFigures="Revenue: $250B", risk="Slowing."),
+        agents.StockScore(symbol="MSFT", score=6, verdict="Fine.", keyFigures="Revenue: $303B", risk="Capex.")])
+    monkeypatch.setattr(llm, "ask", fake_ask(out))
+    monkeypatch.setattr(data, "fundamentals", lambda s: {"revenue": 302.969e9})
+    cands = [Candidate(symbol=s, name=s, assetClass="STOCKS") for s in ("AAPL", "MSFT")]
+    scores, fs = run(agents.financials(cands, count(1)))
+    assert scores["AAPL"][0] == 8.0
+    by = {(f.symbol, f.sentiment): f for f in fs}
+    assert by[("AAPL", "POSITIVE")].numbersVerified is False
+    assert by[("MSFT", "NEUTRAL")].numbersVerified is True
+    assert by[("MSFT", "NEGATIVE")].numbersVerified is None
+
+
+def test_research_agents_unique_ids(monkeypatch):
+    raws = [agents.RawFinding(symbol="NVDA", claim="c", sentiment="NEGATIVE")]
+    ids = count(1)
+    monkeypatch.setattr(llm, "ask", fake_ask(agents.ResearchOut(findings=raws)))
+    a, b = run(agents.landscape(["NVDA"], ids)), run(agents.news(["NVDA"], ids))
+    monkeypatch.setattr(llm, "ask", fake_ask(agents.SocialOut(findings=raws, scores=[agents.SymbolSentiment(symbol="nvda", score=0.4)])))
+    sc, c = run(agents.social(["NVDA"], ids))
+    assert sc == {"NVDA": 0.4}
+    all_ids = [f.id for f in a + b + c]
+    assert all_ids == ["f_1", "f_2", "f_3"] and a[0].agent == "LANDSCAPE" and c[0].agent == "SOCIAL"
