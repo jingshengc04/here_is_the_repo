@@ -288,3 +288,29 @@ def test_fundamentals_stale_cache_used_when_live_fetch_raises(tmp_path, monkeypa
         assert res["revenue"] == 300.0e9
         assert res["trailingPE"] == 25.87
 
+
+@pytest.mark.skipif(os.getenv("LIVE") != "1", reason="Live fetch test requires LIVE=1")
+def test_live_fetches_nvda_gld_btc():
+    """Live integration test: fetches NVDA, GLD, and BTC-USD prices and fundamentals."""
+    df, missing = prices(["NVDA", "GLD", "BTC-USD"], years=5)
+    assert missing == []
+    assert set(df.columns) == {"NVDA", "GLD", "BTC-USD"}
+    assert len(df) >= 250
+    assert (df.index.dayofweek == 4).all()
+    # Check no missing prices in common grid
+    assert not df["NVDA"].isna().any()
+    assert not df["GLD"].isna().any()
+    assert not df["BTC-USD"].isna().any()
+
+    # Fundamentals
+    fund_nvda = fundamentals("NVDA")
+    assert fund_nvda["revenue"] is not None and fund_nvda["revenue"] > 1e10
+    assert fund_nvda["trailingPE"] is not None
+    assert fund_nvda["currentPrice"] is not None
+    assert fund_nvda["asOf"] is not None
+
+    # ETFs and crypto return empty dict
+    assert fundamentals("GLD") == {}
+    assert fundamentals("BTC-USD") == {}
+
+
