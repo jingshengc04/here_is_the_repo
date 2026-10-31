@@ -175,8 +175,35 @@ def target_count(pct: float) -> int:
     return min(8, max(2, math.ceil(pct / 10) + 1))
 
 
+BOND_ETFS = {"SHY", "BND", "AGG", "TIP", "IEF", "VGSH", "SCHO", "BIL", "GOVT", "TLT"}
+# Bond ballast is chosen by DATA (lowest 5y max drawdown): in 2022 only short treasuries cushioned stocks.
+BOND_POOL = {"SHY": "iShares 1-3 Year Treasury Bond ETF", "BIL": "SPDR 1-3 Month T-Bill ETF",
+             "VGSH": "Vanguard Short-Term Treasury ETF", "TIP": "iShares TIPS Bond ETF",
+             "BND": "Vanguard Total Bond Market ETF", "AGG": "iShares Core US Aggregate Bond ETF",
+             "IEF": "iShares 7-10 Year Treasury Bond ETF"}
+BOND_WORDS = ("bond", "treasur", "fixed income", "fixed-income")
+
+
 def _asset_class(sym: str) -> str:
-    return "CRYPTO" if data.is_crypto(sym) else "GOLD" if sym == "GLD" else "STOCKS"
+    return ("CRYPTO" if data.is_crypto(sym) else "GOLD" if sym == "GLD" else "BONDS" if sym in BOND_ETFS else "STOCKS")
+
+
+async def bond_picks(exclude: set[str], n: int) -> list[tuple[str, str, float]]:
+    """The n BOND_POOL ETFs with the smallest 5y max drawdown: [(symbol, name, max drawdown %)] (negative numbers)."""
+    if n <= 0:
+        return []
+    closes, _missing = await asyncio.to_thread(data.prices, list(BOND_POOL), 5)  # caches parquet per symbol
+    if closes is None or closes.empty:
+        return []
+    dd = ((closes / closes.cummax() - 1).min() * 100).dropna().sort_values(ascending=False)
+    out = []
+    for sym, v in dd.items():
+        if sym in exclude or not await asyncio.to_thread(data.resolve, sym):
+            continue
+        out.append((sym, BOND_POOL[sym], round(float(v), 1)))
+        if len(out) == n:
+            break
+    return out
 
 
 async def _is_excluded(c: Candidate, exclude: list[str], esg: bool) -> bool:
@@ -217,7 +244,7 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
         + (f"NEVER pick any of these symbols/sectors/words: {', '.join(exclude)}. " if exclude else "")
         + (f"The investor insists on {', '.join(must)}; they are added automatically, do not spend picks on them. " if must else "")
         + "One-sentence thesis per pick (at most 25 words, dated figures only). No bear-case research. "
-        "Defensive low-volatility large caps (e.g. JNJ, PG) and gold are added automatically afterwards, so focus on the theme."
+        "Defensive low-volatility large caps (e.g. JNJ, PG), bond ETFs and gold are added automatically afterwards, so focus on the theme."
     )
     res = await llm.ask(model=FLASH, input=prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY",
                         on_step=on_step, generation_config=LOW)
@@ -246,6 +273,22 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
             cands.append(Candidate(symbol=sym, name=name, assetClass="STOCKS"))
             raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
                                    claim=f"Added as defensive ballast for a {intake.riskTolerance} profile (5y weekly vol {v}%)."))
+    bond_target = targets.get("BONDS")
+    n_bonds = {"CONSERVATIVE": 2, "MODERATE": 1}.get(intake.riskTolerance, 0)
+    if "DEFENSIVE" in styles:
+        n_bonds = max(n_bonds, 1)
+    if bond_target is not None and bond_target > 0:
+        n_bonds = max(n_bonds, 2 if bond_target > 25 else 1)  # 25% max per holding => need 2+ for targets above 25
+    elif bond_target == 0:
+        n_bonds = 0
+    if n_bonds and any(w in x.lower() for x in exclude for w in BOND_WORDS):
+        note("Bonds were excluded by your preferences, so no bond candidates were added.")
+        n_bonds = 0
+    n_bonds -= sum(1 for c in cands if c.assetClass == "BONDS")  # e.g. user already requested one
+    for sym, name, dd in await bond_picks({c.symbol for c in cands} | {x.upper() for x in exclude}, n_bonds):
+        cands.append(Candidate(symbol=sym, name=name, assetClass="BONDS"))
+        raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
+                               claim=f"Added as bond ballast for a {intake.riskTolerance} profile (5y max drawdown {dd}%)."))
     if not any(c.symbol == "GLD" for c in cands):
         cands.append(Candidate(symbol="GLD", name="SPDR Gold Shares", assetClass="GOLD"))
         raws.append(RawFinding(symbol="GLD", claim="Gold is added as a diversifying hedge against equity and crypto drawdowns.", sentiment="NEUTRAL"))
@@ -264,6 +307,8 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
         have = sum(1 for c in cands if c.assetClass == cls)
         if targets.get(cls) and have < target_count(targets[cls]):
             note(f"Target {cls} {targets[cls]:g}%: only {have} candidates found, so it may be capped by diversification limits.")
+    if (targets.get("BONDS") or 0) > 25 and sum(1 for c in cands if c.assetClass == "BONDS") < 2:
+        note("Target BONDS above 25% needs 2+ bond ETFs (25% max per holding), but fewer were available.")
     return cands, _findings(cap_per_symbol(raws, 1), "DISCOVERY", ids, res)
 
 
