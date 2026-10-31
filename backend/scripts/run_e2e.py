@@ -132,7 +132,7 @@ if __name__ == "__main__":
     ap.add_argument("--amount", type=float, default=10000)
     ap.add_argument("--horizon", type=float, default=2)
     ap.add_argument("--risk", default="MODERATE", choices=["CONSERVATIVE", "MODERATE", "AGGRESSIVE"])
-    ap.add_argument("--theme", default="AI infrastructure")
+    ap.add_argument("--theme", default=None, help="optional; no hidden default theme")
     ap.add_argument("--must-include", default="")
     ap.add_argument("--exclude", default="")
     ap.add_argument("--only-include", default="")
