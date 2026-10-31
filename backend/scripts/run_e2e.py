@@ -66,6 +66,19 @@ async def amain(args) -> int:
     body = {"amountUsd": args.amount, "horizonYears": args.horizon, "riskTolerance": args.risk}
     if args.theme:
         body["theme"] = args.theme
+    prefs = {}
+    if args.must_include:
+        prefs["mustInclude"] = args.must_include.split(",")
+    if args.exclude:
+        prefs["exclude"] = args.exclude.split(",")
+    if args.styles:
+        prefs["styles"] = args.styles.split(",")
+    if args.targets:
+        prefs["assetClassTargets"] = {k: float(v) for k, v in (t.split("=") for t in args.targets.split(","))}
+    if args.notes:
+        prefs["notes"] = args.notes
+    if prefs:
+        body["preferences"] = prefs
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://e2e", timeout=None) as c:
         t0 = time.monotonic()
         r = await c.post("/api/runs", json=body)
@@ -91,12 +104,20 @@ async def amain(args) -> int:
     for rd in rep["rounds"]:
         print(f"round {rd['round']}: isApproved={rd['verification']['isApproved']}"
               + "".join(f"\n   - {x}" for x in rd["verification"]["changesRequested"]))
+    print("candidates:", ", ".join(f"{h['symbol']}{'*' if h.get('isUserRequested') else ''}"
+                                  for sl in rep["finalAllocation"]["slices"] for h in sl["holdings"]), "(* = user requested)")
+    print("preference notes:", rep.get("preferenceNotes") or [])
     print("final weights:")
     for s in rep["finalAllocation"]["slices"]:
         print(f"  {s['assetClass']} {s['weightPct']}%: " + ", ".join(f"{h['symbol']} {h['weightPct']}" for h in s["holdings"]))
     last = rep["rounds"][-1]["backtest"]
     print("crossCheck:", json.dumps(last["crossCheck"]))
     print("sharpeCi:", json.dumps(last.get("sharpeCi")))
+    print("sample finding sources:")
+    for f in [f for f in rep["findings"] if f["sources"]][:6]:
+        print(f"  {f['id']} {f['agent']} {f['symbol']}: " + " | ".join(x["url"][:60] for x in f["sources"]))
+    print("distinct source sets across findings:", len({tuple(x["url"] for x in f["sources"]) for f in rep["findings"] if f["sources"]}),
+          "of", sum(1 for f in rep["findings"] if f["sources"]), "findings with sources")
     print("saved run:", replay.DATA_RUNS_DIR / f"{run_id}.json")
     return 0
 
@@ -107,6 +128,11 @@ if __name__ == "__main__":
     ap.add_argument("--horizon", type=int, default=2)
     ap.add_argument("--risk", default="MODERATE", choices=["CONSERVATIVE", "MODERATE", "AGGRESSIVE"])
     ap.add_argument("--theme", default="AI infrastructure")
+    ap.add_argument("--must-include", default="")
+    ap.add_argument("--exclude", default="")
+    ap.add_argument("--styles", default="")
+    ap.add_argument("--targets", default="", help="e.g. CRYPTO=30,STOCKS=50")
+    ap.add_argument("--notes", default="")
     a = ap.parse_args()
     logging.basicConfig(level=logging.WARNING)
     logging.getLogger("app.llm").setLevel(logging.INFO)
