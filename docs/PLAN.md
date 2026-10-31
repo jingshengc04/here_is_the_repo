@@ -2,7 +2,7 @@
 
 ## Overview
 
-Python backend that implements [`API_CONTRACT.md`](API_CONTRACT.md): it takes an intake (amount, horizon, risk tolerance), then runs 7 Gemini agents that research the market, build a two-level portfolio, backtest it in the Gemini code-execution sandbox, and check that backtest against an independent pandas recompute. If the Verifier rejects the portfolio, it is rebalanced once. Agent progress streams over SSE. Hosted on Cloud Run. **Ships today.**
+Python backend (**Cloud Run**; the Next.js frontend is on **Vercel** and calls it directly) that implements [`API_CONTRACT.md`](API_CONTRACT.md): it takes an intake (amount, horizon, risk tolerance), then runs 7 Gemini agents that research the market, build a two-level portfolio, backtest it in the Gemini code-execution sandbox, and check that backtest against an independent pandas recompute. If the Verifier rejects the portfolio, it is rebalanced once. Agent progress streams over SSE. Hosted on Cloud Run. **Ships today.**
 
 ## Architecture decisions
 
@@ -194,7 +194,7 @@ Deterministic checks (drawdown limit for the risk level, weights sum to 100, max
 
 **Task 14: Lessons memory (optional, P1)** · S
 A lightweight version of Vibe-Trading's persistent memory. After each run, append `{riskTolerance, rejectedReasons, finalMetrics}` to `backend/data/lessons.jsonl`. The Orchestrator prompt then gets the last 5 lessons for the same risk level, so round 1 stops repeating known mistakes.
-- [ ] Flag: `LESSONS=on|off` (**off for the live demo**, so round 1 still shows the rejection; turn it on for a "second run learns" bonus slide).
+- [ ] Feature flag `LESSONS=on|off`, **default off**. With it on, round 1 already avoids past mistakes, so the Verifier's round-1 rejection (our demo moment) may not happen. Keep it off for the main demo run; turn it on for an optional "second run learns" moment.
 - Files: `pipeline.py`, `agents.py`
 
 ### Checkpoint C — end to end

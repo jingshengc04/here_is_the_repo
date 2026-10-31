@@ -220,10 +220,10 @@
 <div class="grid">
   <div class="card"><h3>Hosting</h3>
     <ul>
-      <li><b>Cloud Run</b>, project <code>imp-hallow26lon-5515</code></li>
-      <li>1 instance (runs held in memory)</li>
-      <li>Environment: <code>GEMINI_API_KEY</code>, <code>SEC_USER_AGENT</code></li>
-      <li>Frontend: Next.js (teammates)</li>
+      <li><b>Frontend → Vercel</b>: Next.js (teammates), public URL for the live demo</li>
+      <li><b>Backend → Cloud Run</b>, project <code>imp-hallow26lon-5515</code>. Runs take 2–3 minutes and stream SSE, too long for Vercel functions</li>
+      <li>The browser calls Cloud Run directly (<code>NEXT_PUBLIC_BACKEND_URL</code>, CORS open)</li>
+      <li>1 instance (runs held in memory) · Environment: <code>GEMINI_API_KEY</code>, <code>SEC_USER_AGENT</code></li>
     </ul></div>
   <div class="card"><h3>Build: Orca orchestration</h3>
     <ul>
