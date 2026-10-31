@@ -13,9 +13,9 @@ from pydantic import BaseModel
 
 from backtest.risk_xray import compute_risk_xray
 
-from . import config, data, engine, llm
-from .models import (Allocation, AssetClass, Backtest, Candidate, Check, Finding, IntakeInput, Preferences,
-                     Round, Verification)
+from . import config, data, engine, llm, preferences
+from .models import (Allocation, AssetClass, Backtest, Candidate, Check, Finding, IntakeInput,
+                     ResolvedPreferences, Round, Verification)
 
 SANDBOX_TIMEOUT_S = 45
 SANDBOX_STYLE = " Write one short script; do not iterate or explain; print only the JSON."
@@ -80,12 +80,15 @@ Risk-parity baseline weights (%): {baseline}
 
 PREFS_PROMPT = """
 User preferences (verbatim): {prefs}
-Preference rules (risk limits WIN over preferences, but never silently - explain in rationales):
+Interpretations the user was shown: {interp}
+Rules: the user's preferences beat our defaults (gold, bond and defensive ballast, theme); only the drawdown
+limit can override them, and you must say so in the rationale. Specifically:
 - every mustInclude symbol gets at least 1% weight;
-- never hold a symbol listed in exclude;
-- keep each asset class within +/-5 percentage points of assetClassTargets, UNLESS that would break the
-  drawdown limit above; then get as close to the target as the limit allows;
-- follow the styles and notes.
+- never hold anything the exclude filter matches, nor a class whose classTarget is 0;
+- if the only filter is non-empty, every holding in the classes it covers must match it;
+- favour whatever the prefer filter matches;
+- keep each asset class within +/-5 percentage points of classTargets, UNLESS that would break the drawdown
+  limit above; then get as close to the target as the limit allows.
 """
 
 VERIFIER_PROMPT = """You are the Head of Risk. A proposed portfolio failed these deterministic checks:
@@ -130,16 +133,17 @@ def project(w: list[float], cap: float | None = None) -> list[float]:
     return normalise(w)
 
 
-def _enforce_prefs(hs: list["HoldingOut"], cands: dict[str, Candidate], prefs: Preferences | None
+def _enforce_prefs(hs: list["HoldingOut"], cands: dict[str, Candidate], prefs: ResolvedPreferences | None
                    ) -> tuple[list["HoldingOut"], list[float]]:
-    """Drop excluded symbols, force every resolvable mustInclude to >= 1%, re-cap, re-round."""
-    excl = {x.upper() for x in prefs.exclude} if prefs else set()
-    hs = [h for h in hs if h.symbol.upper() not in excl]
-    must = [m for m in (prefs.mustInclude if prefs else []) if m in cands and m.upper() not in excl]
+    """Drop what the preferences forbid, force every resolvable mustInclude to >= 1%, re-cap, re-round."""
+    hs = [h for h in hs if preferences.allowed(h.symbol, prefs)[0]]
+    must = [m for m in (prefs.mustInclude if prefs else []) if m in cands]
     for m in must:
         if all(h.symbol != m for h in hs):
             hs.append(HoldingOut(symbol=m, weightPct=0, rationale="Included at the user's request.", findingIds=[]))
-    w = normalise([h.weightPct for h in hs])
+    if not hs:
+        raise ValueError("no holding satisfies the user's preferences")
+    w = normalise([h.weightPct for h in hs]) if any(h.weightPct > 0 for h in hs) else [100 / len(hs)] * len(hs)
     low = [i for i, h in enumerate(hs) if h.symbol in must and w[i] < 1.0]
     if low:
         rest = [i for i in range(len(hs)) if i not in low]
@@ -150,7 +154,7 @@ def _enforce_prefs(hs: list["HoldingOut"], cands: dict[str, Candidate], prefs: P
 
 
 def _build_allocation(out: OrchestratorOut, cands: dict[str, Candidate], findings: list[Finding],
-                      baseline: dict[str, float], amount: float, prefs: Preferences | None = None) -> Allocation:
+                      baseline: dict[str, float], amount: float, prefs: ResolvedPreferences | None = None) -> Allocation:
     ids = {f.id for f in findings}
     seen: dict[str, HoldingOut] = {}
     for h in out.holdings:
@@ -184,23 +188,31 @@ def _class_weights(alloc: Allocation) -> dict[str, float]:
     return {s.assetClass: s.weightPct for s in alloc.slices}
 
 
-def _pref_check(prefs: Preferences | None, alloc: Allocation, cands: dict[str, Candidate], dd: float,
+def _pref_check(prefs: ResolvedPreferences | None, alloc: Allocation, cands: dict[str, Candidate], dd: float,
                 limit: float) -> Check:
     name = "User preferences respected"
-    if not prefs or not (prefs.mustInclude or prefs.exclude or prefs.assetClassTargets):
+    if not prefs or not (prefs.mustInclude or prefs.classTargets or not prefs.only.is_empty()
+                         or not prefs.exclude.is_empty()):
         return Check(name=name, isPassed=True, detail="No hard preferences set")
     held = {h.symbol.upper(): h.weightPct for s in alloc.slices for h in s.holdings}
     ok, bad = [], []
+    for sym in held:
+        good, why = preferences.allowed(sym, prefs)
+        if not good:
+            bad.append(f"{sym} held but {why}")
     for m in (m for m in prefs.mustInclude if m in cands):
-        (ok if held.get(m.upper(), 0) >= 1.0 else bad).append(
-            f"{m} held at {held[m.upper()]}%" if held.get(m.upper(), 0) >= 1.0 else f"{m} missing")
-    for x in prefs.exclude:
-        if x.upper() in held:
-            bad.append(f"excluded {x} is held")
+        if held.get(m.upper(), 0) >= 1.0:
+            ok.append(f"{m} held at {held[m.upper()]}%")
+        else:
+            bad.append(f"{m} missing")
     cw = _class_weights(alloc)
     near = dd <= limit + 5  # drawdown at or near its limit: a lower risky-class weight is explained by it
-    for ac, t in (prefs.assetClassTargets or {}).items():
+    for ac, t in prefs.classTargets.items():
         a = cw.get(ac, 0.0)
+        if t == 0:
+            if a == 0:
+                ok.append(f"no {ac.lower()} held as requested")
+            continue  # holdings of a 0-target class were already reported above
         if abs(a - t) <= 5:
             ok.append(f"{ac} {a:g}% within 5pp of {t:g}% target")
         elif a < t and near and ac in RISKY:
@@ -208,29 +220,32 @@ def _pref_check(prefs: Preferences | None, alloc: Allocation, cands: dict[str, C
                       f"({dd:.1f}% vs {limit:g}%)")
         else:
             bad.append(f"{ac} {a:g}% vs {t:g}% target (outside 5pp)")
+    if not bad and not ok:
+        ok.append("all holdings satisfy your filters")
     return Check(name=name, isPassed=not bad,
-                 detail="; ".join(bad + ok) if bad else ("Honoured: " + "; ".join(ok)) if ok else "Nothing to check")
+                 detail="; ".join(bad + ok) if bad else "Honoured: " + "; ".join(ok))
 
 
-def preference_notes(intake: IntakeInput, rounds: list[Round]) -> list[str]:
+def preference_notes(intake: IntakeInput, rounds: list[Round], prefs: ResolvedPreferences | None = None) -> list[str]:
     """Human-readable account of how each preference was honoured or capped (for Report.preferenceNotes)."""
-    prefs = intake.preferences
     if not prefs or not rounds:
         return []
     last = rounds[-1]
     held = {h.symbol: h.weightPct for s in last.allocation.slices for h in s.holdings}
     limit = config.DRAWDOWN_LIMITS[intake.riskTolerance]
     risk = intake.riskTolerance.title()
-    notes = []
+    notes = [f"Understood: {i}" for i in prefs.interpretations]
     for m in prefs.mustInclude:
         notes.append(f"{m} included at {held[m]}% as requested" if m in held
                      else f"{m} could not be included (no usable price history)")
-    for x in prefs.exclude:
-        notes.append(f"{x} excluded as requested" if x not in held else f"{x} could not be excluded")
     cw = _class_weights(last.allocation)
-    for ac, t in (prefs.assetClassTargets or {}).items():
+    for ac, t in prefs.classTargets.items():
         a = cw.get(ac, 0.0)
         label = ac.title()
+        if t == 0:
+            notes.append(f"{label} excluded as requested (0% target)" if a == 0
+                         else f"{label} could not be excluded ({a:g}% held)")
+            continue
         if abs(a - t) <= 5:
             notes.append(f"{label} target {t:g}% met at {a:g}%")
             continue
@@ -294,7 +309,7 @@ def _sandbox_progress(emit, clock=time.monotonic):
 
 
 def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: list[Finding],
-            risk: str, sandbox_note: str = "", prefs: Preferences | None = None,
+            risk: str, sandbox_note: str = "", prefs: ResolvedPreferences | None = None,
             cands: dict[str, Candidate] | None = None) -> list[Check]:
     hs = [h for s in alloc.slices for h in s.holdings]
     limit = config.DRAWDOWN_LIMITS[risk]
@@ -330,12 +345,12 @@ def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: lis
     ]
 
 
-def _crypto_cap(weights: dict[str, float], cands: dict[str, Candidate], closes: pd.DataFrame,
-                limit: float, hi: float | None = None) -> tuple[float, float] | None:
-    """Largest total CRYPTO % (crypto holdings scaled together, rest scaled up, cap applied) whose backtested
-    max drawdown still meets `limit`. Deterministic bisection on the engine; None if even 0% crypto fails."""
+def _class_cap(weights: dict[str, float], cands: dict[str, Candidate], closes: pd.DataFrame,
+               limit: float, ac: str, hi: float | None = None) -> tuple[float, float] | None:
+    """Largest total % of asset class `ac` (its holdings scaled together, rest scaled up, cap applied) whose backtested
+    max drawdown still meets `limit`. Deterministic bisection on the engine; None if even 0% of the class fails."""
     syms = list(weights)
-    crypto = [s for s in syms if cands[s].assetClass == "CRYPTO"]
+    crypto = [s for s in syms if cands[s].assetClass == ac]
     cur = sum(weights[s] for s in crypto)
     if not crypto or cur <= 0 or len(crypto) == len(syms):
         return None
@@ -376,7 +391,9 @@ async def _emit(emit, event: dict) -> None:
 
 
 # ---------- public API ----------
-async def decide(intake: IntakeInput, candidates: list[Candidate], findings: list[Finding], emit) -> list[Round]:
+async def decide(intake: IntakeInput, candidates: list[Candidate], findings: list[Finding], emit,
+                 prefs: ResolvedPreferences | None = None) -> list[Round]:
+    candidates = [c for c in candidates if preferences.allowed(c.symbol, prefs)[0]]  # our defaults never beat the user
     syms = [c.symbol for c in candidates]
     closes, missing = await asyncio.to_thread(data.prices, syms + ["SPY", "AGG"])
     cands = {c.symbol: c for c in candidates if c.symbol not in missing and c.symbol in closes}
@@ -388,11 +405,11 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
     fmt = lambda x: f"{x:.1f}" if isinstance(x, float) else "n/a"
     cand_txt = "\n".join(f"{c.symbol} | {c.name} | {c.assetClass} | financial {fmt(c.financialScore)} | "
                          f"sentiment {fmt(c.sentimentScore)}" for c in cands.values())
-    find_txt = "\n".join(f"{f.id} | {f.symbol} | {f.sentiment} | {f.numbersVerified} | {f.claim}" for f in findings)
+    find_txt = "\n".join(f"{f.id} | {f.symbol} | {f.sentiment} | {f.numbersVerified} | {f.claim}"
+                         for f in findings if f.symbol is None or f.symbol in cands)
     base_txt = ", ".join(f"{s} {w * 100:.1f}" for s, w in baseline.items())
 
-    prefs = intake.preferences
-    prefs_txt = PREFS_PROMPT.format(prefs=prefs.model_dump_json(exclude_none=True)) if prefs else ""
+    prefs_txt = PREFS_PROMPT.format(prefs=prefs.model_dump_json(), interp=prefs.interpretations or "none") if prefs else ""
     rounds: list[Round] = []
     feedback = ""
     for n in range(1, config.MAX_ROUNDS + 1):
@@ -450,37 +467,53 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
             await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER",
                                "message": f"{len(failed)} check(s) failed; drafting requested changes"})
             weights = {h.symbol: h.weightPct for s in alloc.slices for h in s.holdings}
-            t_cry = (prefs.assetClassTargets or {}).get("CRYPTO") if prefs else None
-            cur_cry = _class_weights(alloc).get("CRYPTO", 0.0)
+            cw = _class_weights(alloc)
             limit_dd = config.DRAWDOWN_LIMITS[risk]
             aim_dd = limit_dd * 0.95  # aim 5% inside the limit so rounding/mix changes don't tip it over
-            cap, up_hint = None, ""
+            hint_parts, up_hint, target_msgs = [], "", []
+            caps: dict[str, tuple[float, float] | None] = {}
+
+            def cap_for(ac: str):
+                if ac not in caps:
+                    caps[ac] = _class_cap(weights, cands, closes, aim_dd, ac)
+                return caps[ac]
+
             if not checks[0].isPassed:
-                cap = _crypto_cap(weights, cands, closes, aim_dd)
-            elif t_cry is not None and cur_cry < t_cry - 5:  # drawdown headroom: the target can be approached
-                up = _crypto_cap(weights, cands, closes, aim_dd, hi=t_cry)
-                if up and up[0] > cur_cry:
-                    up_hint = (f"Computed by the backtest engine: you have drawdown headroom. Total CRYPTO can go up "
-                               f"to about {up[0]}% (max drawdown ≈ {up[1]}%, limit {limit_dd:g}%) toward the user's "
-                               f"{t_cry:g}% target; move to about {up[0]}%, not beyond.\n")
-            target_msg = ""
-            if cap and t_cry is not None and cur_cry > cap[0]:
-                target_msg = (f"Your {t_cry:g}% CRYPTO target exceeds what a {risk.title()} profile allows; "
-                              f"reduce to ~{cap[0]:g}%.")
+                if c := cap_for("CRYPTO"):  # default lever: crypto is the usual drawdown driver
+                    hint_parts.append(
+                        f"Computed by the backtest engine: with total CRYPTO at or below {c[0]}% (crypto holdings "
+                        f"scaled down together, the rest scaled up), max drawdown ≈ {c[1]}%. Keep total "
+                        f"CRYPTO at or below {c[0]}%.\n")
+            for ac, t in (prefs.classTargets.items() if prefs else []):
+                if ac not in RISKY or t <= 0:
+                    continue
+                cur = cw.get(ac, 0.0)
+                if not checks[0].isPassed:
+                    c = cap_for(ac)
+                    if c and cur > c[0] and t > c[0]:
+                        target_msgs.append(f"Your {t:g}% {ac} target exceeds what a {risk.title()} profile allows; "
+                                           f"reduce to ~{c[0]:g}%.")
+                elif cur < t - 5:  # drawdown headroom: the target can be approached
+                    up = _class_cap(weights, cands, closes, aim_dd, ac, hi=t)
+                    if up and up[0] > cur:
+                        up_hint += (f"Computed by the backtest engine: you have drawdown headroom. Total {ac} can go "
+                                    f"up to about {up[0]}% (max drawdown ≈ {up[1]}%, limit {limit_dd:g}%) toward the "
+                                    f"user's {t:g}% target; move to about {up[0]}%, not beyond.\n")
+            hint_parts.append(up_hint)
             try:
                 v = await _ask(
                     model=config.MODEL_ARGON, schema=VerifierOut, agent="VERIFIER", **_gen("low"),
                     input=VERIFIER_PROMPT.format(failed="\n".join(f"- {c.name}: {c.detail}" for c in failed),
                                                  metrics=bt.metrics["PORTFOLIO"].model_dump(), weights=weights,
-                                                 extra=up_hint + (f"User preferences: {prefs.model_dump_json(exclude_none=True)}\n"
+                                                 extra=up_hint + (f"User preferences: {prefs.model_dump_json()}\n"
                                                         "If the drawdown failure is caused by a user preference "
                                                         "(e.g. a class target), say so explicitly.\n") if prefs else ""))
                 changes = v.data.changesRequested
             except Exception:
                 pass
             changes = changes or [f"{c.name}: {c.detail}" for c in failed]  # LLM only explains; never blocks
-            if target_msg:
-                changes = [target_msg] + [c for c in changes if c != target_msg]
+            if target_msgs:
+                changes = target_msgs + [c for c in changes if c not in target_msgs]
         verification = Verification(isApproved=not failed, checks=checks, changesRequested=changes)
         await _emit(emit, {"type": "verification.completed", "round": n, "verification": verification.model_dump()})
         await _emit(emit, {"type": "agent.completed", "agent": "VERIFIER",
@@ -491,11 +524,7 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         if verification.isApproved:
             break
         m = bt.metrics["PORTFOLIO"]
-        hint = up_hint
-        if cap:
-            hint += (f"Computed by the backtest engine: with total CRYPTO at or below {cap[0]}% (crypto holdings "
-                    f"scaled down together, the rest scaled up), max drawdown ≈ {cap[1]}%. Keep total "
-                    f"CRYPTO at or below {cap[0]}%.\n")
+        hint = "".join(hint_parts)
         feedback = (
             f"\nROUND {n + 1}. The Verifier rejected your previous proposal.\n"
             f"Previous allocation (% weights): {', '.join(f'{h.symbol} {h.weightPct}%' for s in alloc.slices for h in s.holdings)}\n"

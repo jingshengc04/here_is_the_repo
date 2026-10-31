@@ -235,8 +235,34 @@ def test_progress_throttle_dedupes_and_rate_limits():
     assert sent == ["Sandbox: executing Python", "Sandbox: result received"]
 
 
-# ---------- personalisation ----------
-from app.models import Preferences  # noqa: E402
+# ---------- generic preferences ----------
+from app import preferences  # noqa: E402
+from app.models import Filter, ResolvedPreferences  # noqa: E402
+
+PROFILES = {  # lower-cased Yahoo-style profile data, injected instead of hitting the network
+    "NVDA": ("technology", "semiconductors", "united states"), "MSFT": ("technology", "software", "united states"),
+    "AAPL": ("technology", "consumer electronics", "united states"),
+    "MRNA": ("healthcare", "biotechnology", "united states"), "VRTX": ("healthcare", "biotechnology", "united states"),
+    "REGN": ("healthcare", "biotechnology", "united states"), "GILD": ("healthcare", "biotechnology", "united states"),
+    "BABA": ("consumer cyclical", "internet retail", "china"), "KO": ("consumer defensive", "beverages", "united states"),
+}
+
+
+@pytest.fixture(autouse=True)
+def fake_profiles(monkeypatch):
+    def profile(symbol):
+        sec, ind, cty = PROFILES.get(symbol.upper(), ("", "", ""))
+        return {"symbol": symbol.upper(), "assetClass": preferences.asset_class(symbol), "sector": sec,
+                "industry": ind, "country": cty, "longName": ""}
+    monkeypatch.setattr(preferences, "profile", profile)
+
+
+def C(sym, ac="STOCKS"):
+    return Candidate(symbol=sym, name=sym, assetClass=ac)
+
+
+EXTRA = [C("MRNA"), C("VRTX"), C("REGN"), C("GILD"), C("BABA"), C("KO"), C("SHY", "BONDS"), C("TIP", "BONDS")]
+ALLC = {c.symbol: c for c in CANDS + EXTRA}
 
 
 def _out(weights):
@@ -246,33 +272,77 @@ def _out(weights):
 
 
 def _alloc(weights, prefs):
-    cands = {c.symbol: c for c in CANDS}
-    return decide._build_allocation(_out(weights), cands, FINDINGS, {}, 10000, prefs), cands
+    return decide._build_allocation(_out(weights), ALLC, FINDINGS, {}, 10000, prefs), ALLC
 
 
 def _w(alloc):
     return {h.symbol: h.weightPct for s in alloc.slices for h in s.holdings}
 
 
-def test_exclude_enforced():
-    a, _ = _alloc({"NVDA": 30, "MSFT": 30, "ETH-USD": 20, "GLD": 20}, Preferences(exclude=["eth-usd"]))
+def _sum100(w):
+    return round(sum(w.values()), 1) == 100.0 and max(w.values()) <= 25.0
+
+
+def test_no_gold_class_target_zero_drops_class_and_check_passes():
+    prefs = ResolvedPreferences(classTargets={"GOLD": 0})
+    a, cands = _alloc({"NVDA": 25, "MSFT": 25, "KO": 20, "BTC-USD": 10, "GLD": 20}, prefs)
     w = _w(a)
-    assert "ETH-USD" not in w and round(sum(w.values()), 1) == 100.0
+    assert "GLD" not in w and _sum100(w)
+    assert decide._pref_check(prefs, a, cands, -10, -35.0).isPassed
+
+
+def test_no_gold_violation_is_reported_with_reason():
+    prefs = ResolvedPreferences(classTargets={"GOLD": 0})
+    held, cands = decide._build_allocation(_out({"NVDA": 50, "GLD": 50}), ALLC, FINDINGS, {}, 1e4, None), ALLC
+    c = decide._pref_check(prefs, held, cands, -10, -35.0)
+    assert not c.isPassed and "GLD" in c.detail and "no gold" in c.detail
+
+
+def test_only_biotech_drops_other_stocks_keeps_other_classes():
+    prefs = ResolvedPreferences(only=Filter(industries=["Biotechnology"]))
+    a, cands = _alloc({"MRNA": 20, "VRTX": 20, "REGN": 15, "NVDA": 20, "SHY": 15, "GLD": 10}, prefs)
+    w = _w(a)
+    assert "NVDA" not in w and {"MRNA", "VRTX", "REGN", "SHY", "GLD"} <= set(w) and _sum100(w)
+    assert decide._pref_check(prefs, a, cands, -10, -35.0).isPassed
+
+
+def test_no_tech_drops_every_tech_stock():
+    prefs = ResolvedPreferences(exclude=Filter(sectors=["Technology"]))
+    a, _ = _alloc({"NVDA": 20, "MSFT": 20, "AAPL": 10, "KO": 20, "GLD": 10, "SHY": 10, "BTC-USD": 10}, prefs)
+    w = _w(a)
+    assert not {"NVDA", "MSFT", "AAPL"} & set(w) and _sum100(w)
+
+
+def test_no_china_drops_chinese_company():
+    prefs = ResolvedPreferences(exclude=Filter(countries=["China"]))
+    a, cands = _alloc({"BABA": 25, "NVDA": 25, "KO": 20, "GLD": 15, "SHY": 15}, prefs)
+    w = _w(a)
+    assert "BABA" not in w and _sum100(w)
+    held = decide._build_allocation(_out({"BABA": 50, "KO": 50}), ALLC, FINDINGS, {}, 1e4, None)
+    c = decide._pref_check(prefs, held, cands, -10, -35.0)
+    assert not c.isPassed and "BABA" in c.detail and "country 'China'" in c.detail
 
 
 def test_must_include_forced_at_least_1pct_and_sum_exact():
-    a, _ = _alloc({"NVDA": 25, "MSFT": 25, "BTC-USD": 25, "GLD": 25}, Preferences(mustInclude=["AAPL"]))
+    a, _ = _alloc({"NVDA": 25, "MSFT": 25, "BTC-USD": 25, "GLD": 25}, ResolvedPreferences(mustInclude=["AAPL"]))
     w = _w(a)
-    assert w["AAPL"] >= 1.0 and max(w.values()) <= 25.0 and round(sum(w.values()), 1) == 100.0
+    assert w["AAPL"] >= 1.0 and _sum100(w)
+
+
+def test_must_include_beats_exclude_filter():
+    prefs = ResolvedPreferences(mustInclude=["NVDA"], exclude=Filter(sectors=["Technology"]))
+    a, _ = _alloc({"NVDA": 20, "MSFT": 20, "KO": 20, "GLD": 20, "SHY": 20}, prefs)
+    w = _w(a)
+    assert "NVDA" in w and "MSFT" not in w and _sum100(w)
 
 
 def test_unresolvable_must_include_is_ignored():
-    a, _ = _alloc({"NVDA": 50, "MSFT": 50}, Preferences(mustInclude=["NOPE"]))
+    a, _ = _alloc({"NVDA": 50, "MSFT": 50}, ResolvedPreferences(mustInclude=["NOPE"]))
     assert set(_w(a)) == {"NVDA", "MSFT"}
 
 
 def test_is_user_requested_copied_from_candidate():
-    cands = {c.symbol: c for c in CANDS}
+    cands = dict(ALLC)
     cands["NVDA"] = cands["NVDA"].model_copy()
     object.__setattr__(cands["NVDA"], "isUserRequested", True)
     a = decide._build_allocation(_out({"NVDA": 50, "MSFT": 50}), cands, FINDINGS, {}, 10000, None)
@@ -286,48 +356,73 @@ def _pref_check(weights, prefs, dd):
 
 
 def test_class_target_passes_within_5pp():
-    c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 10, "BTC-USD": 22, "GLD": 18}, Preferences(assetClassTargets={"CRYPTO": 25}), -10)
+    c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 10, "BTC-USD": 22, "GLD": 18},
+                    ResolvedPreferences(classTargets={"CRYPTO": 25}), -10)
     assert c.isPassed, c.detail
 
 
 def test_class_target_fails_outside_5pp_when_drawdown_has_headroom():
     c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 12, "GLD": 18},
-                    Preferences(assetClassTargets={"CRYPTO": 30}), -10)
+                    ResolvedPreferences(classTargets={"CRYPTO": 30}), -10)
     assert not c.isPassed and "CRYPTO" in c.detail
 
 
 def test_class_target_underweight_explained_by_drawdown_limit_passes():
     c = _pref_check({"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 12, "GLD": 18},
-                    Preferences(assetClassTargets={"CRYPTO": 30}), -33.0)
+                    ResolvedPreferences(classTargets={"CRYPTO": 30}), -33.0)
     assert c.isPassed and "drawdown limit" in c.detail and "CRYPTO" in c.detail
 
 
 def test_overweight_never_explained_by_drawdown():
     c = _pref_check({"NVDA": 20, "MSFT": 20, "AAPL": 10, "BTC-USD": 25, "ETH-USD": 5, "GLD": 20},
-                    Preferences(assetClassTargets={"CRYPTO": 10}), -34.0)
+                    ResolvedPreferences(classTargets={"CRYPTO": 10}), -34.0)
     assert not c.isPassed
 
 
 def test_preference_notes_empty_without_prefs(fake):
     rounds, _ = run()
-    assert decide.preference_notes(INTAKE, rounds) == []
+    assert decide.preference_notes(INTAKE, rounds) == [] and decide.preference_notes(INTAKE, rounds, None) == []
 
 
-def test_full_run_with_preferences_notes_and_ninth_check(fake):
-    intake = INTAKE.model_copy(update={"preferences": Preferences(
-        mustInclude=["AAPL"], exclude=["TSLA"], assetClassTargets={"CRYPTO": 30})})
-    rounds = asyncio.run(decide.decide(intake, CANDS, FINDINGS, lambda e: None))
+def test_candidates_not_allowed_never_reach_orchestrator(fake, monkeypatch):
+    prefs = ResolvedPreferences(exclude=Filter(sectors=["Technology"]), classTargets={"GOLD": 0},
+                                interpretations=["'no tech' → sector Technology"])
+    cands = CANDS + [C("KO"), C("SHY", "BONDS")]
+    fake_closes = closes()
+    fake_closes["KO"] = fake_closes["MSFT"] * 0.9
+    fake_closes["SHY"] = 100 + np.arange(len(fake_closes)) * 0.01
+    monkeypatch.setattr(decide.data, "prices", lambda syms, years=5: (fake_closes[[s for s in syms if s in fake_closes]], []))
+    rounds = asyncio.run(decide.decide(INTAKE, cands, FINDINGS, lambda e: None, prefs))
+    p = fake["orch_inputs"][0]
+    assert "NVDA |" not in p and "GLD |" not in p and "KO |" in p
+    assert "'no tech' → sector Technology" in p and "preferences beat our defaults" in p
+    held = {h.symbol for r in rounds for s in r.allocation.slices for h in s.holdings}
+    assert not held & {"NVDA", "MSFT", "AAPL", "GLD"}
+
+
+def test_full_run_notes_and_ninth_check(fake):
+    prefs = ResolvedPreferences(mustInclude=["AAPL"], classTargets={"CRYPTO": 30, "GOLD": 20},
+                                interpretations=["'some crypto' → CRYPTO 30%"])
+    rounds = asyncio.run(decide.decide(INTAKE, CANDS, FINDINGS, lambda e: None, prefs))
     assert all(any(c.name == "User preferences respected" for c in r.verification.checks) for r in rounds)
     assert "preferences (verbatim)" in fake["orch_inputs"][0] and "mustInclude" in fake["orch_inputs"][0]
-    notes = decide.preference_notes(intake, rounds)
+    notes = decide.preference_notes(INTAKE, rounds, prefs)
+    assert "Understood: 'some crypto' → CRYPTO 30%" in notes
     assert any(n.startswith("AAPL included at") and n.endswith("as requested") for n in notes), notes
-    assert "TSLA excluded as requested" in notes
     assert any(n.startswith("Crypto target 30% → ") and "drawdown limit" in n and "round 1 tried" in n for n in notes), notes
+    assert any(n.startswith("Gold target 20%") for n in notes), notes
 
 
-def test_drawdown_failure_from_crypto_target_is_named_in_changes(fake):
-    intake = INTAKE.model_copy(update={"preferences": Preferences(assetClassTargets={"CRYPTO": 50})})
-    rounds = asyncio.run(decide.decide(intake, CANDS, FINDINGS, lambda e: None))
+def test_gold_zero_note_says_excluded_as_requested(fake):
+    prefs = ResolvedPreferences(classTargets={"GOLD": 0})
+    cands = [c for c in CANDS if c.symbol != "GLD"]
+    rounds = asyncio.run(decide.decide(INTAKE, cands, FINDINGS, lambda e: None, prefs))
+    assert "Gold excluded as requested (0% target)" in decide.preference_notes(INTAKE, rounds, prefs)
+
+
+def test_drawdown_failure_from_class_target_is_named_in_changes(fake):
+    prefs = ResolvedPreferences(classTargets={"CRYPTO": 50})
+    rounds = asyncio.run(decide.decide(INTAKE, CANDS, FINDINGS, lambda e: None, prefs))
     assert any("Your 50% CRYPTO target exceeds what a Moderate profile allows; reduce to ~" in c
                for c in rounds[0].verification.changesRequested)
 
@@ -353,7 +448,7 @@ def test_prompt_states_bond_ranges_per_risk(fake):
 
 
 def test_bonds_underweight_not_explained_by_drawdown():
-    prefs = Preferences(assetClassTargets={"BONDS": 40})
+    prefs = ResolvedPreferences(classTargets={"BONDS": 40})
     cands = {c.symbol: c for c in BOND_CANDS}
     a = decide._build_allocation(_out({"NVDA": 25, "MSFT": 25, "AAPL": 20, "SHY": 10, "GLD": 20}), cands, FINDINGS, {}, 1e4, prefs)
     assert not decide._pref_check(prefs, a, cands, -34.0, -35.0).isPassed  # near the limit, but bonds only help
@@ -364,7 +459,7 @@ def test_notes_mention_bonds(fake, monkeypatch):
     cl["SHY"] = 100 * np.cumprod(1 + np.random.default_rng(5).normal(.0005, .002, len(cl)))
     cl["TIP"] = 100 * np.cumprod(1 + np.random.default_rng(6).normal(.0008, .004, len(cl)))
     monkeypatch.setattr(decide.data, "prices", lambda syms, years=5: (cl[[s for s in syms if s in cl]], []))
-    intake = INTAKE.model_copy(update={"preferences": Preferences(assetClassTargets={"BONDS": 20})})
+    prefs = ResolvedPreferences(classTargets={"BONDS": 20})
     state = fake
     orig = decide.llm.ask
 
@@ -377,14 +472,14 @@ def test_notes_mention_bonds(fake, monkeypatch):
         return await orig(**kw)
 
     monkeypatch.setattr(decide.llm, "ask", ask)
-    rounds = asyncio.run(decide.decide(intake, BOND_CANDS, FINDINGS, lambda e: None))
-    notes = decide.preference_notes(intake, rounds)
+    rounds = asyncio.run(decide.decide(INTAKE, BOND_CANDS, FINDINGS, lambda e: None, prefs))
+    notes = decide.preference_notes(INTAKE, rounds, prefs)
     assert any(n.startswith("Bonds target 20% met at 35%") for n in notes) or any("Bonds" in n for n in notes), notes
     assert any(n.startswith("Bonds 35%") and "SHY" in n and "drawdown within -35%" in n for n in notes), notes
 
 
-def test_crypto_cap_can_search_upward_toward_a_target():
+def test_class_cap_can_search_upward_toward_a_target():
     cands = {c.symbol: c for c in CANDS}
     w = {"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 5, "GLD": 25}
-    up = decide._crypto_cap(w, cands, closes(), -60.0, hi=40.0)
+    up = decide._class_cap(w, cands, closes(), -60.0, "CRYPTO", hi=40.0)
     assert up and 5 < up[0] <= 40 and up[1] >= -60.0
