@@ -3,7 +3,7 @@ import base64
 import inspect
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Sequence, Union
 import pandas as pd
 
@@ -24,6 +24,7 @@ class AskResult:
     model_used: str
     duration_ms: int
     sources: list[dict]
+    citations: list[dict] = field(default_factory=list)
 
 
 def text_part(s: str) -> dict:
@@ -139,19 +140,29 @@ def _simplify_step(step: Any) -> dict:
     if queries is None and isinstance(args, dict):
         queries = args.get("queries")
     if queries:
-        query = queries[0] if (isinstance(queries, list) and len(queries) == 1) else (", ".join(queries) if isinstance(queries, list) else str(queries))
-    if query is None and args:
-        query = getattr(args, "query", None) if not isinstance(args, dict) else args.get("query")
+        queries_str = "; ".join(queries) if isinstance(queries, list) else str(queries)
+        query = f"Searching: {queries_str}"
+        s_dict["queries"] = queries if isinstance(queries, list) else [queries]
+    elif getattr(args, "query", None):
+        raw_q = getattr(args, "query")
+        query = f"Searching: {raw_q}" if not str(raw_q).startswith("Searching: ") else str(raw_q)
+    elif isinstance(args, dict) and args.get("query"):
+        raw_q = args.get("query")
+        query = f"Searching: {raw_q}" if not str(raw_q).startswith("Searching: ") else str(raw_q)
+
     if query is None:
-        query = getattr(step, "query", None) if not isinstance(step, dict) else step.get("query")
+        raw_q = getattr(step, "query", None) if not isinstance(step, dict) else step.get("query")
+        if raw_q:
+            query = f"Searching: {raw_q}" if not str(raw_q).startswith("Searching: ") else str(raw_q)
+
     if query is not None:
         s_dict["query"] = query
 
     return s_dict
 
 
-def _extract_sources(steps: list[Any]) -> list[dict]:
-    extracted = []
+def _extract_citations(steps: list[Any]) -> list[dict]:
+    citations = []
     for step in steps:
         # Check model_output content annotations
         content = getattr(step, "content", None)
@@ -164,41 +175,62 @@ def _extract_sources(steps: list[Any]) -> list[dict]:
                     annotations = c.get("annotations")
                 if annotations and isinstance(annotations, list):
                     for a in annotations:
+                        ann_type = getattr(a, "type", None) or (a.get("type") if isinstance(a, dict) else None)
                         url = getattr(a, "url", None) or (a.get("url") if isinstance(a, dict) else None)
-                        title = getattr(a, "title", None) or (a.get("title") if isinstance(a, dict) else "")
-                        if url:
-                            extracted.append({"title": str(title or ""), "url": str(url)})
+                        if url and (ann_type in ("url_citation", None) or hasattr(a, "url")):
+                            title = getattr(a, "title", None) or (a.get("title") if isinstance(a, dict) else "")
+                            start = getattr(a, "start_index", None)
+                            if start is None and isinstance(a, dict):
+                                start = a.get("start_index", a.get("start"))
+                            elif start is None:
+                                start = getattr(a, "start", None)
 
-        # Check step.result (e.g. google_search_result)
-        result = getattr(step, "result", None)
-        if result is None and isinstance(step, dict):
-            result = step.get("result")
-        if result and isinstance(result, list):
-            for item in result:
-                url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
-                title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "")
-                if url:
-                    extracted.append({"title": str(title or ""), "url": str(url)})
+                            end = getattr(a, "end_index", None)
+                            if end is None and isinstance(a, dict):
+                                end = a.get("end_index", a.get("end"))
+                            elif end is None:
+                                end = getattr(a, "end", None)
 
-        # Check step.sources
-        sources = getattr(step, "sources", None)
-        if sources is None and isinstance(step, dict):
-            sources = step.get("sources")
-        if sources and isinstance(sources, list):
-            for item in sources:
-                url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
-                title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "")
-                if url:
-                    extracted.append({"title": str(title or ""), "url": str(url)})
+                            citations.append({
+                                "title": str(title or ""),
+                                "url": str(url),
+                                "start": start,
+                                "end": end,
+                            })
+    return citations
 
-    # Deduplicate by URL
+
+def _extract_sources(steps: list[Any]) -> list[dict]:
+    citations = _extract_citations(steps)
     deduped = []
     seen = set()
-    for s in extracted:
-        u = s.get("url")
+    for c in citations:
+        u = c.get("url")
         if u and u not in seen:
             seen.add(u)
-            deduped.append(s)
+            deduped.append({"title": c.get("title", ""), "url": u})
+
+    # Fallback to step.result or step.sources if annotations weren't present
+    if not deduped:
+        for step in steps:
+            result = getattr(step, "result", None) or (step.get("result") if isinstance(step, dict) else None)
+            if result and isinstance(result, list):
+                for item in result:
+                    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+                    title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "")
+                    if url and url not in seen:
+                        seen.add(url)
+                        deduped.append({"title": str(title or ""), "url": str(url)})
+
+            sources = getattr(step, "sources", None) or (step.get("sources") if isinstance(step, dict) else None)
+            if sources and isinstance(sources, list):
+                for item in sources:
+                    url = getattr(item, "url", None) or (item.get("url") if isinstance(item, dict) else None)
+                    title = getattr(item, "title", None) or (item.get("title") if isinstance(item, dict) else "")
+                    if url and url not in seen:
+                        seen.add(url)
+                        deduped.append({"title": str(title or ""), "url": str(url)})
+
     return deduped
 
 
@@ -228,25 +260,22 @@ async def ask(
     start_time = time.perf_counter()
     client = get_client()
 
-    tools_param = [{"type": t} for t in tools] if tools else None
-    response_format = None
-    if schema is not None:
-        response_format = {
-            "type": "text",
-            "mime_type": "application/json",
-            "schema": schema.model_json_schema(),
-        }
+    tools_list = list(tools) if tools else []
+    tools_param = [{"type": t} for t in tools_list] if tools_list else None
+    has_google_search = any(
+        t == "google_search" or (isinstance(t, dict) and t.get("type") == "google_search")
+        for t in tools_list
+    )
 
     current_model = model
-    model_used = current_model
 
-    async def _call_with_retries(target_model: str, current_input: Any) -> tuple[Any, str]:
+    async def _call_with_retries(target_model: str, current_input: Any, current_tools: Any, current_resp_fmt: Any) -> tuple[Any, str]:
         active_model = target_model
         delays = _BACKOFF_DELAYS
 
         for attempt in range(len(delays)):
             try:
-                interaction = await _execute_call(client, active_model, current_input, tools_param, response_format)
+                interaction = await _execute_call(client, active_model, current_input, current_tools, current_resp_fmt)
                 return interaction, active_model
             except Exception as err:
                 if not _is_retryable_error(err):
@@ -255,59 +284,124 @@ async def ask(
                 if attempt < len(delays) - 1:
                     await asyncio.sleep(delays[attempt])
                 else:
-                    # Final attempt failed
                     if active_model == config.MODEL_ARGON and _is_503(err):
                         # Fall back once to gemini-3.8-flash
                         active_model = config.MODEL_FLASH
-                        interaction = await _execute_call(client, active_model, current_input, tools_param, response_format)
+                        interaction = await _execute_call(client, active_model, current_input, current_tools, current_resp_fmt)
                         return interaction, active_model
                     raise err
         raise RuntimeError("Retries exhausted without result")
 
-    # First attempt (with retries and model fallback)
-    interaction, model_used = await _call_with_retries(current_model, input)
-    output_text = getattr(interaction, "output_text", "") or ""
+    is_search_with_schema = has_google_search and (schema is not None)
 
-    # Schema validation and repair if needed
-    data = output_text
-    if schema is not None:
+    if is_search_with_schema:
+        # Step 1: Make grounded search call WITHOUT response_format to preserve url_citations
+        path_taken = "two_step_search_and_schema_conversion"
+        interaction, model_used = await _call_with_retries(
+            current_model, input, current_tools=tools_param, current_resp_fmt=None
+        )
+        grounded_text = getattr(interaction, "output_text", "") or ""
+
+        # Process steps & progress from the search call
+        raw_steps = getattr(interaction, "steps", []) or []
+        simplified_steps = []
+        for s in raw_steps:
+            s_dict = _simplify_step(s)
+            simplified_steps.append(s_dict)
+            if on_step is not None:
+                cb_res = on_step(s_dict)
+                if inspect.isawaitable(cb_res):
+                    await cb_res
+
+        sources = _extract_sources(raw_steps)
+        citations = _extract_citations(raw_steps)
+
+        # Step 2: Cheap conversion call with gemini-3.8-flash, no tools, structured response_format
+        schema_format = {
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": schema.model_json_schema(),
+        }
+        convert_prompt = (
+            f"Original user request: {_truncate_and_strip(input, 1000)}\n\n"
+            f"Grounded research text:\n{grounded_text}\n\n"
+            f"Extract and return valid JSON matching the schema."
+        )
+
+        schema_interaction, _ = await _call_with_retries(
+            config.MODEL_FLASH, convert_prompt, current_tools=None, current_resp_fmt=schema_format
+        )
+        output_text = getattr(schema_interaction, "output_text", "") or ""
+
         try:
             data = schema.model_validate_json(output_text)
         except Exception as val_err:
-            repair_prompt = f"\n\nValidation error: {val_err}\nPlease return valid JSON matching the schema."
-            if isinstance(input, str):
-                repaired_input = input + repair_prompt
-            elif isinstance(input, list):
-                repaired_input = list(input) + [{"type": "text", "text": repair_prompt}]
-            else:
-                repaired_input = str(input) + repair_prompt
-
-            interaction, model_used = await _call_with_retries(model_used, repaired_input)
-            output_text = getattr(interaction, "output_text", "") or ""
+            repair_prompt = f"{convert_prompt}\n\nValidation error: {val_err}\nPlease return valid JSON matching the schema."
+            schema_interaction, _ = await _call_with_retries(
+                config.MODEL_FLASH, repair_prompt, current_tools=None, current_resp_fmt=schema_format
+            )
+            output_text = getattr(schema_interaction, "output_text", "") or ""
             data = schema.model_validate_json(output_text)
 
-    # Process steps
-    raw_steps = getattr(interaction, "steps", []) or []
-    simplified_steps = []
-    for s in raw_steps:
-        s_dict = _simplify_step(s)
-        simplified_steps.append(s_dict)
-        if on_step is not None:
-            cb_res = on_step(s_dict)
-            if inspect.isawaitable(cb_res):
-                await cb_res
+    else:
+        path_taken = "single_step_direct"
+        response_format = None
+        if schema is not None:
+            response_format = {
+                "type": "text",
+                "mime_type": "application/json",
+                "schema": schema.model_json_schema(),
+            }
 
-    sources = _extract_sources(raw_steps)
+        interaction, model_used = await _call_with_retries(
+            current_model, input, current_tools=tools_param, current_resp_fmt=response_format
+        )
+        output_text = getattr(interaction, "output_text", "") or ""
+
+        data = output_text
+        if schema is not None:
+            try:
+                data = schema.model_validate_json(output_text)
+            except Exception as val_err:
+                repair_prompt = f"\n\nValidation error: {val_err}\nPlease return valid JSON matching the schema."
+                if isinstance(input, str):
+                    repaired_input = input + repair_prompt
+                elif isinstance(input, list):
+                    repaired_input = list(input) + [{"type": "text", "text": repair_prompt}]
+                else:
+                    repaired_input = str(input) + repair_prompt
+
+                interaction, model_used = await _call_with_retries(
+                    model_used, repaired_input, current_tools=tools_param, current_resp_fmt=response_format
+                )
+                output_text = getattr(interaction, "output_text", "") or ""
+                data = schema.model_validate_json(output_text)
+
+        raw_steps = getattr(interaction, "steps", []) or []
+        simplified_steps = []
+        for s in raw_steps:
+            s_dict = _simplify_step(s)
+            simplified_steps.append(s_dict)
+            if on_step is not None:
+                cb_res = on_step(s_dict)
+                if inspect.isawaitable(cb_res):
+                    await cb_res
+
+        sources = _extract_sources(raw_steps)
+        citations = _extract_citations(raw_steps)
+
     duration_ms = int((time.perf_counter() - start_time) * 1000)
 
-    # Logging
+    # Logging at INFO with path documentation
     logger.info(
-        "agent=%s model=%s tools=%s duration_ms=%d model_used=%s prompt=%s output=%s",
+        "agent=%s model=%s tools=%s path=%s duration_ms=%d model_used=%s sources_count=%d prompt=%s output=%s",
         agent,
         model,
-        list(tools) if tools else [],
+        tools_list,
+        path_taken,
         duration_ms,
         model_used,
+        len(sources),
         _truncate_and_strip(input),
         _truncate_and_strip(output_text),
     )
@@ -319,4 +413,5 @@ async def ask(
         model_used=model_used,
         duration_ms=duration_ms,
         sources=sources,
+        citations=citations,
     )
