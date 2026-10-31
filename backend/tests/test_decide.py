@@ -483,3 +483,36 @@ def test_class_cap_can_search_upward_toward_a_target():
     w = {"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 5, "GLD": 25}
     up = decide._class_cap(w, cands, closes(), -60.0, "CRYPTO", hi=40.0)
     assert up and 5 < up[0] <= 40 and up[1] >= -60.0
+
+
+# ---------- horizons ----------
+def test_horizon_rendering():
+    assert [decide.horizon_text(h) for h in (0.25, 0.5, 1, 2, 10)] == ["3-month", "6-month", "1-year", "2-year", "10-year"]
+    assert decide.horizon_text(0.99) == "12-month" or decide.horizon_text(0.99) == "1-year"
+
+
+def test_short_horizon_in_orchestrator_prompt(fake):
+    intake = INTAKE.model_copy(update={"horizonYears": 0.25})
+    asyncio.run(decide.decide(intake, CANDS, FINDINGS, lambda e: None))
+    p = fake["orch_inputs"][0]
+    assert "3-month" in p and "liquidity" in p and "capital preservation" in p
+
+
+def test_long_horizon_has_no_short_guidance(fake):
+    run()
+    p = fake["orch_inputs"][0]
+    assert "2-year" in p and "capital preservation" not in p
+
+
+def test_summary_prompt_mentions_horizon(fake, monkeypatch):
+    rounds, _ = run()
+    seen = []
+
+    async def ask(**kw):
+        seen.append(kw["input"])
+        return llm.AskResult("", "ok", [], "m", 1, [])
+
+    monkeypatch.setattr(decide.llm, "ask", ask)
+    intake = INTAKE.model_copy(update={"horizonYears": 0.25})
+    asyncio.run(decide.summarize(intake, rounds, FINDINGS))
+    assert "Horizon: 3-month" in seen[0]
