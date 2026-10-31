@@ -429,6 +429,7 @@ def test_conflict_warning_conservative_meme():
             riskTolerance="CONSERVATIVE",
             theme=None,
             preferences=mock_pref,
+            conflictNote="Meme coins can drop 80%+; with a Conservative profile they'll be kept small (a few %). Want to switch to Aggressive?",
         )
         mock_res = AskResult(
             data=mock_data,
@@ -522,6 +523,7 @@ def test_conflict_warning_keep_conservative():
             riskTolerance="CONSERVATIVE",
             theme=None,
             preferences=mock_pref,
+            conflictNote="Meme coins can drop 80%+; with a Conservative profile they'll be kept small (a few %). Want to switch to Aggressive?",
         )
         mock_res = AskResult(
             data=mock_data,
@@ -690,5 +692,254 @@ def test_live_intake_4_turns():
         assert "switch to Aggressive" in turn4.reply or "switch to aggressive" in turn4.reply.lower()
 
     asyncio.run(_run())
+
+
+def test_offline_acceptance_five_phrasings():
+    """Offline acceptance: 5 phrasings land in the right preference fields.
+    1. 'no gold' -> assetClassTargets: {GOLD: 0}, exclude: ['gold']
+    2. 'only biotech' -> onlyInclude: ['biotech']
+    3. 'no tech' -> exclude: ['tech']
+    4. 'no Chinese companies' -> exclude: ['Chinese companies']
+    5. 'ethical investing only' -> onlyInclude: ['ethical investing']
+    """
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        cases = [
+            ("no gold", {"exclude": ["gold"], "assetClassTargets": {"GOLD": 0.0}}),
+            ("only biotech", {"onlyInclude": ["biotech"]}),
+            ("no tech", {"exclude": ["tech"]}),
+            ("no Chinese companies", {"exclude": ["Chinese companies"]}),
+            ("ethical investing only", {"onlyInclude": ["ethical investing"]}),
+        ]
+
+        for phrase, expected in cases:
+            req = IntakeTurnRequest(messages=[ChatMessage(role="user", content=phrase)])
+            mock_pref = _PreferencesExtraction(
+                mustInclude=expected.get("mustInclude", []),
+                exclude=expected.get("exclude", []),
+                assetClassTargets=expected.get("assetClassTargets"),
+                onlyInclude=expected.get("onlyInclude", []),
+                notes=expected.get("notes"),
+            )
+            mock_data = _IntakeExtraction(
+                reply=f"Noted preference: {phrase}.",
+                amountUsd=None,
+                horizonYears=None,
+                riskTolerance=None,
+                theme=None,
+                preferences=mock_pref,
+            )
+            mock_res = AskResult(
+                data=mock_data,
+                text="",
+                steps=[],
+                model_used="gemini-3.8-flash",
+                duration_ms=100,
+                sources=[],
+            )
+            with patch("app.llm.ask", new_callable=AsyncMock, return_value=mock_res):
+                turn = await intake_turn(req)
+                assert turn.intake.preferences is not None, f"Failed for {phrase}"
+                p = turn.intake.preferences
+                if "onlyInclude" in expected:
+                    for item in expected["onlyInclude"]:
+                        assert item in p.onlyInclude, f"Expected {item} in onlyInclude for '{phrase}', got {p.onlyInclude}"
+                if "exclude" in expected:
+                    for item in expected["exclude"]:
+                        assert item in p.exclude, f"Expected {item} in exclude for '{phrase}', got {p.exclude}"
+                if "assetClassTargets" in expected:
+                    assert p.assetClassTargets is not None, f"Expected assetClassTargets for '{phrase}'"
+                    for k, v in expected["assetClassTargets"].items():
+                        assert p.assetClassTargets.get(k) == v, f"Expected target {k}:{v} for '{phrase}', got {p.assetClassTargets}"
+
+    asyncio.run(_run())
+
+
+def test_preferences_persist_open_ended_across_turns():
+    """Preferences gathered on turn 1 must persist across turns 2 and 3 even if omitted by model."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        # Turn 1: user gives open-ended preferences
+        t1_req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="only bio stocks, no gold, I'm cautious")
+        ])
+        mock_pref1 = _PreferencesExtraction(
+            onlyInclude=["bio stocks"],
+            exclude=["gold"],
+            assetClassTargets={"GOLD": 0.0},
+        )
+        mock_data1 = _IntakeExtraction(
+            reply="Understood: cautious profile with only bio stocks and no gold. How much to invest?",
+            amountUsd=None,
+            horizonYears=None,
+            riskTolerance="CONSERVATIVE",
+            preferences=mock_pref1,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data1, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn1 = await intake_turn(t1_req)
+            assert turn1.intake.preferences is not None
+            assert "bio stocks" in turn1.intake.preferences.onlyInclude
+            assert "gold" in turn1.intake.preferences.exclude
+            assert turn1.intake.preferences.assetClassTargets == {"GOLD": 0.0}
+
+        # Turn 2: user gives amount, model omits preferences
+        t2_req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="only bio stocks, no gold, I'm cautious"),
+            ChatMessage(role="assistant", content=turn1.reply),
+            ChatMessage(role="user", content="10k"),
+        ])
+        mock_data2 = _IntakeExtraction(
+            reply="Got $10,000. How many years?",
+            amountUsd=10000.0,
+            horizonYears=None,
+            riskTolerance="CONSERVATIVE",
+            preferences=None,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data2, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn2 = await intake_turn(t2_req)
+            assert turn2.intake.amountUsd == 10000.0
+            assert turn2.intake.preferences is not None
+            assert "bio stocks" in turn2.intake.preferences.onlyInclude
+            assert "gold" in turn2.intake.preferences.exclude
+            assert turn2.intake.preferences.assetClassTargets == {"GOLD": 0.0}
+
+        # Turn 3: user gives horizon, model omits preferences
+        t3_req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="only bio stocks, no gold, I'm cautious"),
+            ChatMessage(role="assistant", content=turn1.reply),
+            ChatMessage(role="user", content="10k"),
+            ChatMessage(role="assistant", content=turn2.reply),
+            ChatMessage(role="user", content="3 years"),
+        ])
+        mock_data3 = _IntakeExtraction(
+            reply="3 years noted. Your portfolio is ready to review.",
+            amountUsd=10000.0,
+            horizonYears=3,
+            riskTolerance="CONSERVATIVE",
+            preferences=None,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data3, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn3 = await intake_turn(t3_req)
+            assert turn3.intake.amountUsd == 10000.0
+            assert turn3.intake.horizonYears == 3
+            assert turn3.intake.preferences is not None
+            assert "bio stocks" in turn3.intake.preferences.onlyInclude
+            assert "gold" in turn3.intake.preferences.exclude
+            assert turn3.intake.preferences.assetClassTargets == {"GOLD": 0.0}
+
+    asyncio.run(_run())
+
+
+def test_conflict_note_said_only_once():
+    """Conflict warning is judged by model, stated once in <= 1 sentence, and NOT repeated on later turns."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        conflict_text = "Removing gold removes a portfolio hedge for a conservative investor; we could keep a 5% allocation instead."
+
+        # Turn 1: user says cautious + no gold, model notes conflict
+        t1_req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="I have 10k for 3 years, cautious, but no gold")
+        ])
+        mock_pref1 = _PreferencesExtraction(
+            exclude=["gold"],
+            assetClassTargets={"GOLD": 0.0},
+        )
+        mock_data1 = _IntakeExtraction(
+            reply="Understood.",
+            amountUsd=10000.0,
+            horizonYears=3,
+            riskTolerance="CONSERVATIVE",
+            preferences=mock_pref1,
+            conflictNote=conflict_text,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data1, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn1 = await intake_turn(t1_req)
+            # The conflict note must be in turn1 reply
+            assert conflict_text in turn1.reply
+
+        # Turn 2: user replies "proceed with no gold"
+        t2_req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="I have 10k for 3 years, cautious, but no gold"),
+            ChatMessage(role="assistant", content=turn1.reply),
+            ChatMessage(role="user", content="proceed with no gold"),
+        ])
+        # Even if the model repeats the conflictNote on turn 2:
+        mock_data2 = _IntakeExtraction(
+            reply="Great, proceeding without gold. Click Run to begin.",
+            amountUsd=10000.0,
+            horizonYears=3,
+            riskTolerance="CONSERVATIVE",
+            preferences=mock_pref1,
+            conflictNote=conflict_text,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data2, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn2 = await intake_turn(t2_req)
+            # Python ensures the conflict note is NOT repeated!
+            assert conflict_text not in turn2.reply
+            assert "proceeding without gold" in turn2.reply
+            assert turn2.isComplete is True
+
+    asyncio.run(_run())
+
+
+def test_clarifying_question_for_ambiguous_only():
+    """An ambiguous 'only' phrase triggers ONE short clarifying question about other asset classes."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="10k, 2 years, moderate, only bio stocks")
+        ])
+        mock_pref = _PreferencesExtraction(
+            onlyInclude=["bio stocks"],
+        )
+        mock_data = _IntakeExtraction(
+            reply="Noted.",
+            amountUsd=10000.0,
+            horizonYears=2,
+            riskTolerance="MODERATE",
+            preferences=mock_pref,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn = await intake_turn(req)
+            # Clarifying question must appear
+            reply_lower = turn.reply.lower()
+            assert any(word in reply_lower for word in ("crypto", "gold", "bonds", "asset class")), (
+                f"Expected clarifying question about other asset classes, got: {turn.reply}"
+            )
+            # Should not be complete while clarifying
+            assert turn.isComplete is False
+
+        # Next turn: user clarifies "keep gold and bonds, no crypto"
+        req2 = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="10k, 2 years, moderate, only bio stocks"),
+            ChatMessage(role="assistant", content=turn.reply),
+            ChatMessage(role="user", content="keep gold and bonds, no crypto"),
+        ])
+        mock_pref2 = _PreferencesExtraction(
+            onlyInclude=["bio stocks"],
+            exclude=["crypto"],
+            assetClassTargets={"CRYPTO": 0.0},
+        )
+        mock_data2 = _IntakeExtraction(
+            reply="Got it, keeping gold and bonds with no crypto. Your intake is complete!",
+            amountUsd=10000.0,
+            horizonYears=2,
+            riskTolerance="MODERATE",
+            preferences=mock_pref2,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data2, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn2 = await intake_turn(req2)
+            # After clarifying, intake can complete and question is not asked again
+            assert turn2.isComplete is True
+            assert "bio stocks" in turn2.intake.preferences.onlyInclude
+            assert "crypto" in turn2.intake.preferences.exclude
+            assert turn2.intake.preferences.assetClassTargets == {"CRYPTO": 0.0}
+
+    asyncio.run(_run())
+
 
 
