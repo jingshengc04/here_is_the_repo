@@ -97,3 +97,11 @@ def test_sandbox_prompt():
     p = engine.sandbox_prompt({"AAA": 0.7, "BBB": 0.3})
     for s in ("pandas", "AAA", "0.7", "weekly", "totalReturnPct", "maxDrawdownPct", "JSON"):
         assert s in p
+
+
+def test_live_sandbox_fixture_matches_gemini():
+    """The exact CSV Gemini's sandbox computed as 22.12% in the 2026-10-31 live test."""
+    from app.engine import equity_curve
+    c = pd.DataFrame({"AAA": [100, 110, 99, 120], "BBB": [50, 45, 55, 60]},
+                     index=pd.to_datetime(["2024-01-05", "2024-01-12", "2024-01-19", "2024-01-26"]))
+    assert round((equity_curve(c, {"AAA": .6, "BBB": .4}).iloc[-1] - 1) * 100, 2) == 22.12
