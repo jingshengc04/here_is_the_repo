@@ -132,3 +132,21 @@ def test_missing_bear_case_fails_check(fake):
     rounds, _ = run(findings=[f for f in FINDINGS if f.symbol != "NVDA"])
     c = next(c for c in rounds[0].verification.checks if "bear" in c.name.lower())
     assert not c.isPassed and "NVDA" in c.detail
+
+
+def test_cap_projection_54pct_gld():
+    out = decide.project([54.0, 25.0, 12.0, 5.0, 2.0, 2.0])
+    assert max(out) <= 25.0 and round(sum(out), 1) == 100.0 and out[1] == 25.0
+
+
+def test_cap_projection_infeasible_leaves_weights():
+    assert decide.project([60.0, 40.0]) == [60.0, 40.0]  # < 4 holdings: cap cannot sum to 100
+
+
+def test_round2_prompt_has_failed_checks_and_constraints(fake):
+    run()
+    p1, p2 = fake["orch_inputs"]
+    for p in (p1, p2):
+        assert "25" in p and "effective" in p.lower() and "-35" in p
+    assert "Max drawdown" in p2 and "Backtest max drawdown" in p2 and "smallest changes" in p2
+    assert "BTC-USD 25.0%" in p2  # round-1 allocation included

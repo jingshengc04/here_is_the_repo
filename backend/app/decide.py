@@ -5,6 +5,7 @@ import inspect
 import json
 import math
 import re
+import logging
 import time
 
 import pandas as pd
@@ -16,6 +17,7 @@ from . import config, data, engine, llm
 from .models import (Allocation, AssetClass, Backtest, Candidate, Check, Finding, IntakeInput, Round,
                      Verification)
 
+log = logging.getLogger("app.decide")
 ORDER = ["STOCKS", "CRYPTO", "GOLD"]
 
 
@@ -44,14 +46,20 @@ class VerifierOut(BaseModel):
 
 ORCH_PROMPT = """You are a senior cross-asset allocator building ONE portfolio from the research below.
 Risk tolerance: {risk}. Horizon: {years} years. Amount: ${amount:,.0f}. Theme: {theme}.
-Hard limits the Verifier will enforce: max drawdown no worse than {dd}% in the backtest, no holding above
-{maxh}%, at least 4 effective positions, every non-gold holding must have a documented bear case (a NEGATIVE
-finding), and no holding may cite a finding whose numbers failed verification.
 
-Output: per asset class (STOCKS/CRYPTO/GOLD) a weight and a rationale; per holding a weight (% of the whole
-portfolio, summing to 100), a 1-3 sentence rationale that weighs the bull AND bear evidence, and findingIds
-(only ids from the list below). Use only the candidate symbols. Start from the risk-parity baseline and tilt
-using financial/sentiment scores; do not exceed the risk limits.
+HARD CONSTRAINTS (the Verifier rejects the portfolio if any is violated):
+- Holding weights are % of the whole portfolio and sum to exactly 100.
+- Max single holding: {maxh}% (no exceptions, gold included).
+- Effective number of positions (1 / sum of squared weights) >= 4: use at least 5 holdings, none dominant.
+- Backtested max drawdown no worse than {dd}% ({risk} limit); crypto is the main drawdown driver.
+- At least 1 holding in every asset class you use (STOCKS/CRYPTO/GOLD).
+- Gold is a hedge: typically 5-20% (above 25% is never allowed).
+- Every non-gold holding needs a documented bear case (a NEGATIVE finding); never cite a finding whose
+  numbersVerified is False.
+
+Output: per asset class a weight and a rationale; per holding a weight, a 1-3 sentence rationale weighing
+bull AND bear evidence, and findingIds (only ids from the list below). Use only the candidate symbols. Start
+from the risk-parity baseline and tilt using financial/sentiment scores.
 
 Candidates (financialScore 1-10, sentimentScore -1..1):
 {cands}
@@ -84,6 +92,26 @@ def normalise(raw: list[float]) -> list[float]:
     return [o / 10 for o in out]
 
 
+def project(w: list[float], cap: float | None = None) -> list[float]:
+    """Cap each weight at `cap`, redistributing the excess proportionally to the uncapped (water-filling)."""
+    cap = config.MAX_HOLDING_PCT if cap is None else cap
+    if len(w) * cap < 100 or max(w) <= cap:
+        return w  # nothing to do, or infeasible (fewer than 100/cap holdings); the Verifier flags it
+    w = list(w)
+    for _ in range(len(w)):
+        over = [i for i, x in enumerate(w) if x > cap]
+        if not over:
+            break
+        excess = sum(w[i] - cap for i in over)
+        free = [i for i, x in enumerate(w) if x < cap]
+        base = sum(w[i] for i in free)
+        for i in over:
+            w[i] = cap
+        for i in free:
+            w[i] += excess * w[i] / base
+    return normalise(w)
+
+
 def _build_allocation(out: OrchestratorOut, cands: dict[str, Candidate], findings: list[Finding],
                       baseline: dict[str, float], amount: float) -> Allocation:
     ids = {f.id for f in findings}
@@ -95,7 +123,9 @@ def _build_allocation(out: OrchestratorOut, cands: dict[str, Candidate], finding
         seen = {s: HoldingOut(symbol=s, weightPct=w, rationale="Risk-parity baseline.", findingIds=[])
                 for s, w in baseline.items()}
     hs = list(seen.values())
-    weights = normalise([h.weightPct for h in hs])
+    # ponytail: constraint projection (max-holding cap) so a bad LLM proposal still satisfies the hard limit;
+    # the Verifier still checks everything, this only removes the most common failure.
+    weights = project(normalise([h.weightPct for h in hs]))
     cls_rat = {c.assetClass: c.rationale for c in out.assetClasses}
     slices = []
     for ac in ORDER:
@@ -161,6 +191,18 @@ def _checks(alloc: Allocation, bt: Backtest, closes: pd.DataFrame, findings: lis
     ]
 
 
+def _gen(level: str) -> dict:
+    ok = "generation_config" in inspect.signature(llm.ask).parameters
+    return {"generation_config": {"thinking_level": level}} if ok else {}
+
+
+async def _ask(**kw):
+    t = time.perf_counter()
+    r = await llm.ask(**kw)
+    log.info("call agent=%s model=%s %.1fs", kw["agent"], kw["model"], time.perf_counter() - t)
+    return r
+
+
 async def _emit(emit, event: dict) -> None:
     r = emit(event)
     if inspect.isawaitable(r):
@@ -194,7 +236,8 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
                                     theme=intake.theme or "none", dd=config.DRAWDOWN_LIMITS[risk],
                                     maxh=config.MAX_HOLDING_PCT, cands=cand_txt, findings=find_txt or "(none)",
                                     baseline=base_txt, feedback=feedback)
-        res = await llm.ask(model=config.MODEL_ARGON, input=prompt, schema=OrchestratorOut, agent="ORCHESTRATOR")
+        res = await _ask(model=config.MODEL_ARGON, input=prompt, schema=OrchestratorOut, agent="ORCHESTRATOR",
+                         **_gen("medium"))
         alloc = _build_allocation(res.data, cands, findings, {s: w * 100 for s, w in baseline.items()},
                                   intake.amountUsd)
         await _emit(emit, {"type": "allocation.proposed", "round": n, "allocation": alloc.model_dump()})
@@ -212,9 +255,9 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
                                else f"Sandbox step: {step.get('type')}"})
 
         async def sandbox(df: pd.DataFrame, w: dict) -> dict:
-            r = await llm.ask(model=config.MODEL_FLASH,
-                              input=[llm.text_part(engine.sandbox_prompt(w)), llm.csv_part(df)],
-                              tools=["code_execution"], agent="VERIFIER", on_step=on_step)
+            r = await _ask(model=config.MODEL_FLASH,
+                           input=[llm.text_part(engine.sandbox_prompt(w)), llm.csv_part(df)],
+                           tools=["code_execution"], agent="VERIFIER", on_step=on_step)
             return _parse_sandbox(r)
 
         await _emit(emit, {"type": "agent.progress", "agent": "VERIFIER", "message": "Running backtest in sandbox"})
@@ -229,8 +272,8 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
                                "message": f"{len(failed)} check(s) failed; drafting requested changes"})
             weights = {h.symbol: h.weightPct for s in alloc.slices for h in s.holdings}
             try:
-                v = await llm.ask(
-                    model=config.MODEL_ARGON, schema=VerifierOut, agent="VERIFIER",
+                v = await _ask(
+                    model=config.MODEL_ARGON, schema=VerifierOut, agent="VERIFIER", **_gen("low"),
                     input=VERIFIER_PROMPT.format(failed="\n".join(f"- {c.name}: {c.detail}" for c in failed),
                                                  metrics=bt.metrics["PORTFOLIO"].model_dump(), weights=weights))
                 changes = v.data.changesRequested
@@ -246,9 +289,16 @@ async def decide(intake: IntakeInput, candidates: list[Candidate], findings: lis
         rounds.append(Round(round=n, allocation=alloc, backtest=bt, verification=verification))
         if verification.isApproved:
             break
-        feedback = ("\nThe Verifier rejected your previous proposal "
-                    f"({', '.join(f'{h.symbol} {h.weightPct}%' for s in alloc.slices for h in s.holdings)}). "
-                    "changesRequested:\n" + "\n".join(f"- {c}" for c in changes) + "\nRevise accordingly.")
+        m = bt.metrics["PORTFOLIO"]
+        feedback = (
+            f"\nROUND {n + 1}. The Verifier rejected your previous proposal.\n"
+            f"Previous allocation (% weights): {', '.join(f'{h.symbol} {h.weightPct}%' for s in alloc.slices for h in s.holdings)}\n"
+            f"Previous backtest: return {m.totalReturnPct}%, max drawdown {m.maxDrawdownPct}%, "
+            f"volatility {m.volatilityPct}%, sharpe {m.sharpe}\n"
+            "Failed checks:\n" + "\n".join(f"- {c.name}: {c.detail}" for c in failed) + "\n"
+            "changesRequested:\n" + "\n".join(f"- {c}" for c in changes) + "\n"
+            "Fix exactly the failed checks listed; keep every other constraint satisfied; make the smallest "
+            "changes that fix them (adjust the previous allocation, do not rewrite it).")
     return rounds
 
 
@@ -264,5 +314,5 @@ async def summarize(intake: IntakeInput, rounds: list[Round], findings: list[Fin
         f"Portfolio: {m.model_dump()}\nSPY: {spy.model_dump()}\n"
         f"Rounds: {[(r.round, r.verification.isApproved, r.verification.changesRequested) for r in rounds]}\n"
         f"Findings: {len(findings)} collected")
-    res = await llm.ask(model=config.MODEL_FLASH, input=prompt, agent="ORCHESTRATOR")
+    res = await _ask(model=config.MODEL_FLASH, input=prompt, agent="ORCHESTRATOR", **_gen("low"))
     return res.text.strip()
