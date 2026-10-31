@@ -31,8 +31,8 @@ Your job is to collect 3 required fields and any personalisation preferences fro
 Optional:
 4. theme: An investment theme or focus if mentioned (e.g., "AI infrastructure", "clean energy"), max 200 characters.
 5. preferences: Personalisation for ANY preference (e.g. "I don't like gold", "only bio stocks", "no tech", "no Chinese companies", "companies I use every day", "ethical only"):
-   - onlyInclude: Restrict-the-universe phrases or words in user's own words, without over-normalising (e.g., "only bio stocks" -> ["bio stocks"], "only biotech" -> ["biotech"], "ethical investing only" -> ["ethical investing"]). Max 10.
-   - exclude: Symbols or plain words to avoid/exclude in user's own words (e.g., "no tech" -> ["tech"], "no Chinese companies" -> ["Chinese companies"], "no gold" -> ["gold"]). Max 20.
+   - onlyInclude: Restrict-the-universe phrases or words in user's own words, without over-normalising (e.g., "only bio stocks" -> ["bio stocks"], "only biotech" -> ["biotech"], "ethical investing only" -> ["ethical investing"]). Max 10. Split compound phrases on "and", "or", commas into separate items.
+   - exclude: Symbols or plain words to avoid/exclude in user's own words (e.g., "no tech" -> ["tech"], "no Chinese companies" -> ["Chinese companies"], "no gold" -> ["gold"]). Max 20. Split compound preferences on "and", "or", commas, "anything", etc. into separate list items ("tech companies and anything Chinese" -> ["tech companies", "Chinese companies"]).
    - mustInclude: Specific tickers user insists on (e.g. "NVDA", "BTC-USD", "DOGE-USD"). Max 10.
    - assetClassTargets: Specific target percentages (e.g. {"CRYPTO": 30}). For "no gold" (or no crypto / bonds / stocks), set {"GOLD": 0} as well as exclude: ["gold"].
    - styles: Styles if mentioned: GROWTH, VALUE, DIVIDEND, MOMENTUM, MEME, ESG, DEFENSIVE (e.g. "dividends" -> DIVIDEND, "ethical" -> ESG).
@@ -41,9 +41,10 @@ Optional:
 RULES:
 - Ask ONE short, conversational question at a time for whatever information is missing or unclear.
 - Keep your replies concise: at most 2 sentences.
-- When all 3 required fields (amount, horizon 1-10 years, risk tolerance) are known:
+- When all 3 required fields (amount, horizon 0.25-10 years, risk tolerance) are known:
   - If no preferences exist yet, ask ONE short optional question: "Anything you specifically want or want to avoid, like certain coins, companies, dividends, or ethical exclusions?"
   - If preferences already exist or the user replies with "no"/"nothing", summarize the intake and tell the user they can review and run.
+- Truthful confirmation: Do NOT list or summarize saved preferences in your free-text reply (e.g., do not say 'excluding tech and Chinese companies'). A system-generated 'Saved:' line will confirm the exact preferences to the user automatically.
 - Conflict warning: Judge whether ANY stated preference may clash with the risk level (concentration from "only X", high-volatility assets, removing hedges like gold or bonds for a conservative user). If it does, mention the trade-off once in <= 1 sentence and offer an alternative (in `conflictNote` and/or in reply). Never repeat it if already mentioned in earlier assistant messages.
 - Ambiguity: If an "only" phrase is ambiguous about other asset classes (e.g. "only bio stocks": does the user also want no crypto, gold or bonds?), ask ONE short clarifying question in `clarifyingQuestion` or reply: "Do you also want no crypto, gold, or bonds, or should those asset classes still be included?"
 - Merge across turns: never drop preferences gathered earlier.
@@ -117,8 +118,6 @@ STYLE_MAP = {
     "green": "ESG",
     "sustainable": "ESG",
     "defensive": "DEFENSIVE",
-    "safe": "DEFENSIVE",
-    "cautious": "DEFENSIVE",
 }
 
 ASSET_CLASS_MAP = {
@@ -146,8 +145,24 @@ MEME_COIN_SYMBOLS = {
 }
 
 
+FILLER_WORDS = {"please", "really", "just", "only"}
+
+
+def clean_filler_words(phrase: str) -> str:
+    """Strip leading and trailing filler words ('please', 'really', 'just', 'only')."""
+    words = phrase.strip().split()
+    while words and words[0].lower() in FILLER_WORDS:
+        words = words[1:]
+    while words and words[-1].lower() in FILLER_WORDS:
+        words = words[:-1]
+    return " ".join(words)
+
+
 def normalize_symbol_or_entity(name: str, is_exclude: bool = False) -> str:
     cleaned = name.strip()
+    if is_exclude:
+        cleaned = re.sub(r"^(?:really\s+)?(?:don't\s+like|do\s+not\s+like|dislike|hate|avoid|no|exclude|without)\s+", "", cleaned, flags=re.I).strip()
+        cleaned = clean_filler_words(cleaned)
     lower = cleaned.lower()
 
     if is_exclude:
@@ -189,7 +204,7 @@ class _PreferencesExtraction(BaseModel):
     )
     exclude: list[str] = Field(
         default_factory=list,
-        description="Symbols or plain words to avoid/exclude in user's words (e.g. TSLA, tech, Chinese companies, gold). Max 20.",
+        description="Symbols or plain words to avoid/exclude. Split compound preferences on 'and', 'or', commas into separate items (e.g. 'tech companies and anything Chinese' -> ['tech companies', 'Chinese companies']). Max 20.",
     )
     assetClassTargets: dict[str, float] | None = Field(
         default=None,
@@ -205,12 +220,12 @@ class _PreferencesExtraction(BaseModel):
     )
     onlyInclude: list[str] = Field(
         default_factory=list,
-        description="Restrict-the-universe phrases or words in user's words (e.g. 'bio stocks', 'biotech', 'ethical investing'). Max 10.",
+        description="Restrict-the-universe phrases or words. Split compound phrases into separate items. Max 10.",
     )
 
 
 class _IntakeExtraction(BaseModel):
-    reply: str = Field(description="Assistant reply to the user, <= 2 sentences.")
+    reply: str = Field(description="Assistant reply to the user, <= 2 sentences. Do NOT list preferences here; system will show Saved line.")
     amountUsd: float | None = Field(default=None, description="Amount in USD, or null if unknown.")
     horizonYears: float | None = Field(
         default=None,
@@ -233,6 +248,163 @@ class _IntakeExtraction(BaseModel):
     )
 
 
+CONFLICT_KEYWORDS = (
+    "volatil",
+    "hedge",
+    "clash",
+    "concentrat",
+    "trade-off",
+    "tradeoff",
+    "diversif",
+    "kept small",
+    "solely on",
+)
+
+STOP_WORDS = {
+    "a", "an", "the", "in", "on", "at", "to", "for", "of", "with",
+    "is", "are", "was", "were", "and", "or", "it", "its", "can", "be",
+    "this", "that", "your", "you", "we", "could", "would", "which",
+    "solely", "exclusively", "strictly",
+}
+
+
+def normalize_for_comparison(phrase: str) -> str:
+    """Normalize phrase for comparison: case-insensitive, whitespace-normalised, filler words stripped."""
+    words = re.findall(r"\b[a-zA-Z0-9_\-']+\b", phrase.lower())
+    filtered = [w for w in words if w not in FILLER_WORDS and w not in ("don't", "dont", "like", "hate", "dislike")]
+    return " ".join(filtered)
+
+
+def dedupe_list(items: list[str]) -> list[str]:
+    """Dedupe list of phrases: case-insensitive and whitespace-normalised,
+    with filler words ('please', 'really', 'just', 'only') stripped for comparison.
+    Keep the cleaner variant.
+    """
+    seen: dict[str, str] = {}
+    for item in items:
+        cleaned_item = " ".join(item.strip().split())
+        if not cleaned_item:
+            continue
+        key = normalize_for_comparison(cleaned_item)
+        if not key:
+            key = cleaned_item.lower()
+        cleaner = clean_filler_words(cleaned_item) or cleaned_item
+        if key not in seen:
+            seen[key] = cleaner
+        else:
+            existing = seen[key]
+            if len(cleaner) < len(existing) and len(cleaner) > 0:
+                seen[key] = cleaner
+    return list(seen.values())
+
+
+def get_significant_words(sentence: str) -> set[str]:
+    words = re.findall(r"\b[a-zA-Z0-9_\-']+\b", sentence.lower())
+    return {w for w in words if w not in STOP_WORDS and len(w) > 2}
+
+
+def is_conflict_sentence(sentence: str) -> bool:
+    s_low = sentence.lower()
+    if "risk tolerance" in s_low or "what is your risk" in s_low or "how much risk" in s_low:
+        return False
+    return any(w in s_low for w in CONFLICT_KEYWORDS)
+
+
+def word_overlap_ratio(s1: str, s2: str) -> float:
+    w1 = get_significant_words(s1)
+    w2 = get_significant_words(s2)
+    if not w1 or not w2:
+        return 0.0
+    common = w1 & w2
+    return len(common) / min(len(w1), len(w2))
+
+
+def dedupe_conflict_sentences(text: str) -> str:
+    """One conflict sentence max per reply: keep first sentence mentioning trade-off, drop near-duplicates."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+    if len(sentences) <= 1:
+        return text
+
+    filtered_sentences = []
+    first_conflict_sentence = None
+
+    for s in sentences:
+        if is_conflict_sentence(s):
+            if first_conflict_sentence is None:
+                first_conflict_sentence = s
+                filtered_sentences.append(s)
+            else:
+                # Drop duplicate or near-duplicate conflict sentence
+                continue
+        else:
+            if first_conflict_sentence and word_overlap_ratio(first_conflict_sentence, s) > 0.50:
+                continue
+            filtered_sentences.append(s)
+
+    return " ".join(filtered_sentences)
+
+
+def format_saved_preferences(pref: Preferences | None) -> str:
+    """Format an authoritative confirmation string of saved structured preferences."""
+    if pref is None:
+        return ""
+
+    parts = []
+
+    # 1. onlyInclude
+    if pref.onlyInclude:
+        parts.append(f"only {', '.join(pref.onlyInclude)}")
+
+    # 2. Exclude (non-asset classes)
+    non_ac_ex = [x for x in pref.exclude if x.lower() not in ("gold", "crypto", "bonds", "stocks")]
+    if non_ac_ex:
+        parts.append(f"avoid {', '.join(non_ac_ex)}")
+
+    # 3. Styles
+    if pref.styles:
+        styles_str = ", ".join("dividends" if s == "DIVIDEND" else s.lower() for s in pref.styles)
+        parts.append(f"prefer {styles_str}")
+
+    # 4. Must include
+    if pref.mustInclude:
+        parts.append(f"include {', '.join(pref.mustInclude)}")
+
+    # 5. Asset class targets (including zeros like 'no gold')
+    if pref.assetClassTargets:
+        for k, v in pref.assetClassTargets.items():
+            if v == 0:
+                parts.append(f"no {k.lower()}")
+            else:
+                pct = int(v) if v.is_integer() else v
+                parts.append(f"{pct}% {k.lower()}")
+    else:
+        for ac in ("gold", "crypto", "bonds", "stocks"):
+            if any(x.lower() == ac for x in pref.exclude):
+                parts.append(f"no {ac}")
+
+    # 6. Notes
+    if pref.notes:
+        parts.append(pref.notes)
+
+    if not parts:
+        return ""
+
+    return f"Saved: {' · '.join(parts)}"
+
+    # 5. Must include
+    if pref.mustInclude:
+        parts.append(f"include {', '.join(pref.mustInclude)}")
+
+    # 6. Notes
+    if pref.notes:
+        parts.append(pref.notes)
+
+    if not parts:
+        return ""
+
+    return f"Saved: {' · '.join(parts)}"
+
+
 def validate_and_sanitize_preferences(
     raw: _PreferencesExtraction | Preferences | dict | None,
 ) -> tuple[Preferences | None, list[str]]:
@@ -252,7 +424,7 @@ def validate_and_sanitize_preferences(
 
     dropped_warnings = []
 
-    # 1. mustInclude (normalize and filter <= 40 chars, max 10)
+    # 1. mustInclude (normalize and filter <= 40 chars, max 10, deduped)
     raw_must = raw_dict.get("mustInclude") or []
     must_include = []
     for s in raw_must:
@@ -260,9 +432,9 @@ def validate_and_sanitize_preferences(
             norm = normalize_symbol_or_entity(s, is_exclude=False)
             if len(norm) <= 40 and norm not in must_include:
                 must_include.append(norm)
-    must_include = must_include[:10]
+    must_include = dedupe_list(must_include)[:10]
 
-    # 2. exclude (normalize and filter <= 40 chars, max 20)
+    # 2. exclude (normalize and filter <= 40 chars, max 20, deduped)
     raw_ex = raw_dict.get("exclude") or []
     exclude = []
     for s in raw_ex:
@@ -270,9 +442,9 @@ def validate_and_sanitize_preferences(
             norm = normalize_symbol_or_entity(s, is_exclude=True)
             if len(norm) <= 40 and norm not in exclude:
                 exclude.append(norm)
-    exclude = exclude[:20]
+    exclude = dedupe_list(exclude)[:20]
 
-    # 3. onlyInclude (filter <= 40 chars, max 10, keep user words)
+    # 3. onlyInclude (filter <= 40 chars, max 10, keep user words, deduped)
     raw_only = raw_dict.get("onlyInclude") or []
     only_include = []
     for s in raw_only:
@@ -280,7 +452,7 @@ def validate_and_sanitize_preferences(
             norm = s.strip()
             if len(norm) <= 40 and norm not in only_include:
                 only_include.append(norm)
-    only_include = only_include[:10]
+    only_include = dedupe_list(only_include)[:10]
 
     # 4. styles
     raw_styles = raw_dict.get("styles") or []
@@ -370,31 +542,42 @@ def extract_explicit_preferences(text: str) -> dict:
         pref["assetClassTargets"][cls_key] = val
 
     # 2. Restrict-the-universe: "only bio stocks", "only biotech", "ethical investing only", "ethical only"
-    for m in re.finditer(r"\bonly\s+([a-zA-Z0-9_\-\s]{2,30})\b", text, re.I):
-        phrase = m.group(1).strip()
-        phrase = re.split(r"[,.;]|and|or|\bwith\b|\bfor\b", phrase)[0].strip()
-        if phrase and phrase.lower() not in ("preferences", "preference", "thanks", "problem", "usd", "dollars"):
-            if phrase not in pref["onlyInclude"]:
-                pref["onlyInclude"].append(phrase)
+    for m in re.finditer(r"\bonly\s+([^.;\n]+)", text, re.I):
+        clause = m.group(1).strip()
+        clause = re.split(r"[,;]\s*(?:and\s+)?(?:i\s+)?(?:really\s+)?(?:don't|do\s+not|hate|dislike|avoid|want|prefer)\b", clause, flags=re.I)[0]
+        raw_parts = re.split(r"[,;]|\band\b|\bor\b", clause, flags=re.I)
+        for part in raw_parts:
+            phrase = clean_filler_words(part).strip()
+            if phrase and phrase.lower() not in ("preferences", "preference", "thanks", "problem", "usd", "dollars"):
+                if len(phrase) <= 40 and phrase not in pref["onlyInclude"]:
+                    pref["onlyInclude"].append(phrase)
 
     for m in re.finditer(r"\b([a-zA-Z0-9_\-\s]{2,30})\s+only\b", text, re.I):
-        phrase = m.group(1).strip()
-        phrase = re.split(r"[,.;]|and|or|\bwith\b|\bfor\b", phrase)[-1].strip()
-        if phrase and phrase.lower() not in ("preferences", "preference", "thanks", "problem", "usd", "dollars"):
-            if phrase not in pref["onlyInclude"]:
-                pref["onlyInclude"].append(phrase)
+        clause = m.group(1).strip()
+        raw_parts = re.split(r"[,;]|\band\b|\bor\b", clause, flags=re.I)
+        for part in raw_parts:
+            phrase = clean_filler_words(part).strip()
+            if phrase and phrase.lower() not in ("preferences", "preference", "thanks", "problem", "usd", "dollars"):
+                if len(phrase) <= 40 and phrase not in pref["onlyInclude"]:
+                    pref["onlyInclude"].append(phrase)
 
     # 3. Dislikes / Exclusions: "no gold", "no tech", "no Chinese companies", "I don't like gold", "I hate tech", "avoid oil"
-    for m in re.finditer(r"\b(?:no|avoid|exclude|without|hate|dislike|don't like|do not like)\s+([a-zA-Z0-9_\-\s]{2,30})\b", text, re.I):
-        phrase = m.group(1).strip()
-        phrase = re.split(r"[,.;]|and|or|\bwith\b|\bfor\b|\bbut\b", phrase)[0].strip()
-        if phrase and phrase.lower() not in ("preferences", "preference", "other preferences", "other preference", "thanks", "problem", "crashes", "loss"):
-            norm = normalize_symbol_or_entity(phrase, is_exclude=True)
-            if norm not in pref["exclude"]:
-                pref["exclude"].append(norm)
-            if norm.lower() in ("gold", "crypto", "bonds", "stocks"):
-                ac_key = ASSET_CLASS_MAP.get(norm.lower(), norm.upper())
-                pref["assetClassTargets"][ac_key] = 0.0
+    dislike_pattern = r"\b(?:really\s+don't\s+like|don't\s+like|do\s+not\s+like|hate|dislike|no|avoid|exclude|without)\s+([^.;\n]+)"
+    for m in re.finditer(dislike_pattern, text, re.I):
+        clause = m.group(1).strip()
+        clause = re.split(r"[,;]\s*(?:and\s+)?(?:i\s+)?(?:want|prefer|include|invest\s+in)\b", clause, flags=re.I)[0]
+        raw_parts = re.split(r"[,;]|\band\b|\bor\b|\banything\b|\bany\b", clause, flags=re.I)
+        for part in raw_parts:
+            phrase = clean_filler_words(part).strip()
+            if phrase.lower() in ("chinese", "anything chinese"):
+                phrase = "Chinese companies"
+            if phrase and phrase.lower() not in ("preferences", "preference", "other preferences", "other preference", "thanks", "problem", "crashes", "loss"):
+                norm = normalize_symbol_or_entity(phrase, is_exclude=True)
+                if norm not in pref["exclude"]:
+                    pref["exclude"].append(norm)
+                if norm.lower() in ("gold", "crypto", "bonds", "stocks"):
+                    ac_key = ASSET_CLASS_MAP.get(norm.lower(), norm.upper())
+                    pref["assetClassTargets"][ac_key] = 0.0
 
     # 4. Styles: e.g. "dividend", "dividends", "ethical", "growth", "value", "meme"
     for word, st in STYLE_MAP.items():
@@ -428,6 +611,10 @@ def extract_explicit_preferences(text: str) -> dict:
 
     if not pref["assetClassTargets"]:
         pref["assetClassTargets"] = None
+
+    pref["mustInclude"] = dedupe_list(pref["mustInclude"])
+    pref["exclude"] = dedupe_list(pref["exclude"])
+    pref["onlyInclude"] = dedupe_list(pref["onlyInclude"])
 
     return pref
 
@@ -771,6 +958,9 @@ Analyze the full conversation history. Extract the current known intake values a
     if "targets_over_100" in dropped_warnings:
         reply = "Target allocations must sum to at most 100%. How would you like to divide your portfolio between stocks, crypto, and gold?"
 
+    # Dedupe duplicate or near-duplicate conflict sentences
+    reply = dedupe_conflict_sentences(reply)
+
     # Ensure replies are concise (<= 2 sentences)
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", reply) if s.strip()]
     if len(sentences) > 2:
@@ -794,15 +984,23 @@ Analyze the full conversation history. Extract the current known intake values a
         preferences=pref,
     )
 
+    conflict_blocks = conflict_active and (
+        conflict_note is not None and (
+            "switch to" in conflict_note.lower()
+            or conflict_note.strip().endswith("?")
+        )
+    )
+
     is_complete = False
     if (
         draft.amountUsd is not None
         and draft.horizonYears is not None
         and draft.riskTolerance is not None
         and not had_out_of_range_horizon
-        and not conflict_active
+        and not conflict_blocks
         and not clarifying_active
         and not asked_preferences_now
+        and "specifically want or want to avoid" not in reply.lower()
         and "targets_over_100" not in dropped_warnings
     ):
         try:
@@ -816,6 +1014,19 @@ Analyze the full conversation history. Extract the current known intake values a
             is_complete = True
         except Exception:
             is_complete = False
+
+    # Truthful confirmation: when preferences change or intake completes,
+    # Python appends or builds the preference part of the reply from saved structured data.
+    # The model free-text must not list preferences itself; the Python 'Saved:' line is authoritative.
+    saved_line = format_saved_preferences(pref) if has_preferences else ""
+    already_confirmed = bool(saved_line and any(saved_line in m.content for m in req.messages if m.role == "assistant"))
+    should_show_saved = bool(saved_line) and (is_complete or not already_confirmed)
+
+    if should_show_saved and saved_line:
+        # Strip any model-generated Saved: line to ensure Python's is authoritative
+        reply = re.sub(r"(?:^|\s*)Saved:\s*.*?(?=(?:\n|$))", "", reply, flags=re.IGNORECASE).strip()
+        if saved_line not in reply:
+            reply = f"{reply} {saved_line}".strip() if reply else saved_line
 
     return IntakeTurn(
         reply=reply,

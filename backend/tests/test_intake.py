@@ -992,4 +992,130 @@ def test_clarifying_question_for_ambiguous_only():
     asyncio.run(_run())
 
 
+def test_extraction_completeness_compound_dislikes():
+    """Extraction completeness: 'I hate tech companies and anything Chinese, I want dividends'
+    must save BOTH exclusions ('tech companies' and 'Chinese companies'/'Chinese') and style DIVIDEND,
+    even when model omits preferences.
+    """
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction
+
+        req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="8000 dollars, aggressive, 2 years"),
+            ChatMessage(role="assistant", content="Anything you specifically want or want to avoid?"),
+            ChatMessage(role="user", content="I hate tech companies and anything Chinese, I want dividends"),
+        ])
+        mock_data = _IntakeExtraction(
+            reply="Understood! Your portfolio is ready.",
+            amountUsd=8000.0,
+            horizonYears=2.0,
+            riskTolerance="AGGRESSIVE",
+            preferences=None,  # model omitted preferences
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn = await intake_turn(req)
+            assert turn.intake.preferences is not None
+            ex = [s.lower() for s in turn.intake.preferences.exclude]
+            assert any("tech" in s for s in ex), f"Expected tech exclusion in {ex}"
+            assert any("chinese" in s for s in ex), f"Expected Chinese exclusion in {ex}"
+            assert "DIVIDEND" in turn.intake.preferences.styles
+
+    asyncio.run(_run())
+
+
+def test_truthful_confirmation_saved_line():
+    """Truthful confirmation: reply must include 'Saved: ...' generated from structured data."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="8000 dollars, aggressive, 2 years"),
+            ChatMessage(role="assistant", content="Anything you specifically want or want to avoid?"),
+            ChatMessage(role="user", content="I hate tech companies and anything Chinese, I want dividends"),
+        ])
+        mock_pref = _PreferencesExtraction(
+            exclude=["tech companies", "Chinese companies"],
+            styles=["DIVIDEND"],
+        )
+        mock_data = _IntakeExtraction(
+            reply="Your portfolio setup is ready to review.",
+            amountUsd=8000.0,
+            horizonYears=2.0,
+            riskTolerance="AGGRESSIVE",
+            preferences=mock_pref,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn = await intake_turn(req)
+            assert "Saved:" in turn.reply
+            assert "tech companies" in turn.reply.lower() or "tech" in turn.reply.lower()
+            assert "chinese" in turn.reply.lower()
+            assert "dividend" in turn.reply.lower()
+
+    asyncio.run(_run())
+
+
+def test_dedupe_strips_filler_words():
+    """Dedupe: case-insensitive and strips filler words ('please', 'really', 'just', 'only'), keeping the cleaner variant."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        # Model or user produces duplicates with filler words
+        req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="only bio stocks please, and only bio stocks, really don't like gold")
+        ])
+        mock_pref = _PreferencesExtraction(
+            onlyInclude=["bio stocks please", "bio stocks"],
+            exclude=["really don't like gold", "gold"],
+            assetClassTargets={"GOLD": 0.0},
+        )
+        mock_data = _IntakeExtraction(
+            reply="Got your preferences.",
+            preferences=mock_pref,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn = await intake_turn(req)
+            assert turn.intake.preferences is not None
+            # Duplicates should be collapsed to cleaner variant
+            assert turn.intake.preferences.onlyInclude == ["bio stocks"]
+            assert turn.intake.preferences.exclude == ["gold"]
+
+    asyncio.run(_run())
+
+
+def test_one_conflict_sentence_max_per_reply():
+    """One conflict sentence max per reply: keep first sentence mentioning trade-off, drop near-duplicates."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction, _PreferencesExtraction
+
+        req = IntakeTurnRequest(messages=[
+            ChatMessage(role="user", content="only bio stocks please, and I really don't like gold, I'm cautious")
+        ])
+        mock_pref = _PreferencesExtraction(
+            onlyInclude=["bio stocks"],
+            exclude=["gold"],
+            assetClassTargets={"GOLD": 0.0},
+        )
+        # Model returns duplicate conflict sentences in conflictNote and reply
+        s1 = "Focusing solely on bio stocks carries high volatility which clashes with a cautious profile."
+        s2 = "Concentrating solely on bio stocks can be quite volatile for a cautious approach."
+        mock_data = _IntakeExtraction(
+            reply=f"{s2} How much are you planning to invest?",
+            amountUsd=None,
+            horizonYears=None,
+            riskTolerance="CONSERVATIVE",
+            preferences=mock_pref,
+            conflictNote=s1,
+        )
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=AskResult(data=mock_data, text="", steps=[], model_used="gemini-3.8-flash", duration_ms=100, sources=[])):
+            turn = await intake_turn(req)
+            # Only ONE of s1 or s2 should be in reply, not both!
+            s1_in = s1.lower() in turn.reply.lower() or "focusing solely on bio stocks" in turn.reply.lower()
+            s2_in = s2.lower() in turn.reply.lower() or "concentrating solely on bio stocks" in turn.reply.lower()
+            assert not (s1_in and s2_in), f"Both conflict sentences found in reply: {turn.reply}"
+            assert "how much" in turn.reply.lower()
+
+    asyncio.run(_run())
+
+
+
 
