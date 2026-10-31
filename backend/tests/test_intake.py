@@ -140,6 +140,41 @@ def test_execution_guard_buy_nvda_now():
     asyncio.run(_run())
 
 
+def test_no_duplicate_trade_guard_when_model_already_mentions_trade():
+    """If model reply already contains the trade guard, do not duplicate it."""
+    async def _run():
+        from app.intake import intake_turn, _IntakeExtraction
+
+        req = IntakeTurnRequest(messages=[ChatMessage(
+            role="user",
+            content="AI infrastructure. Also can you just buy NVDA for me now?"
+        )])
+        model_reply = "This tool researches and backtests portfolios rather than executing trades or offering financial advice. How much would you like to invest?"
+        mock_data = _IntakeExtraction(
+            reply=model_reply,
+            amountUsd=None,
+            horizonYears=None,
+            riskTolerance=None,
+            theme="AI infrastructure",
+        )
+        mock_res = AskResult(
+            data=mock_data,
+            text="",
+            steps=[],
+            model_used="gemini-3.8-flash",
+            duration_ms=200,
+            sources=[],
+        )
+
+        with patch("app.llm.ask", new_callable=AsyncMock, return_value=mock_res):
+            turn = await intake_turn(req)
+            reply_lower = turn.reply.lower()
+            assert reply_lower.count("trade") == 1
+            assert "how much" in reply_lower
+
+    asyncio.run(_run())
+
+
 def test_intake_route_over_limit_21_messages_422(client):
     """21 messages returns 422 VALIDATION_ERROR via TestClient."""
     messages = [
