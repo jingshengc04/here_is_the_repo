@@ -4,6 +4,7 @@ This is the FAKE: it replays app/fixtures/report.example.json as a realistic eve
 """
 import asyncio
 import importlib
+import inspect
 import json
 import os
 import time
@@ -104,10 +105,11 @@ async def _run_agent(emit: Emit, agent: str, model: str, coro_fn):
     return result, findings
 
 
-async def research(intake: IntakeInput, emit: Emit) -> tuple[list[Candidate], list]:
+async def research(intake: IntakeInput, emit: Emit, notes_out: list[str] | None = None) -> tuple[list[Candidate], list]:
     """Research phase: DISCOVERY, then FINANCIALS/LANDSCAPE/NEWS/SOCIAL in parallel. Returns (candidates, findings)."""
     ids = count(1)
-    cands, findings = await _run_agent(emit, "DISCOVERY", FLASH, lambda cb: agents.discovery(intake, ids, cb))
+    cands, findings = await _run_agent(emit, "DISCOVERY", FLASH, lambda cb: agents.discovery(intake, ids, cb, notes_out=notes_out))
+    notes = intake.preferences.notes if intake.preferences else None
     stocks = [c for c in cands if c.assetClass == "STOCKS"]
     syms = [c.symbol for c in cands]
 
@@ -116,10 +118,10 @@ async def research(intake: IntakeInput, emit: Emit) -> tuple[list[Candidate], li
         return (None, r) if isinstance(r, list) else r
 
     results = await asyncio.gather(
-        _run_agent(emit, "FINANCIALS", FLASH, lambda cb: agents.financials(stocks, ids, cb)),
-        _run_agent(emit, "LANDSCAPE", FLASH, lambda cb: pack(agents.landscape(syms, ids, cb))),
-        _run_agent(emit, "NEWS", FLASH, lambda cb: pack(agents.news(syms, ids, cb))),
-        _run_agent(emit, "SOCIAL", FLASH, lambda cb: agents.social(syms, ids, cb)),
+        _run_agent(emit, "FINANCIALS", FLASH, lambda cb: agents.financials(stocks, ids, cb, notes=notes)),
+        _run_agent(emit, "LANDSCAPE", FLASH, lambda cb: pack(agents.landscape(syms, ids, cb, notes=notes))),
+        _run_agent(emit, "NEWS", FLASH, lambda cb: pack(agents.news(syms, ids, cb, notes=notes))),
+        _run_agent(emit, "SOCIAL", FLASH, lambda cb: agents.social(syms, ids, cb, notes=notes)),
         return_exceptions=True)  # a failing agent already emitted agent.failed; the run continues
     ok = [None if isinstance(r, Exception) else r for r in results]
     scores = ok[0][0] if ok[0] else {}
@@ -145,14 +147,20 @@ async def run_real(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
     decide = importlib.import_module("app.decide")
 
     await emit({"type": "run.started", "agents": ["DISCOVERY", *PARALLEL, "ORCHESTRATOR", "VERIFIER"]})
-    cands, findings = await research(intake, emit)
+    pref_notes: list[str] = []
+    cands, findings = await research(intake, emit, pref_notes)
     rounds = await decide.decide(intake, cands, findings, emit)
     summary = await decide.summarize(intake, rounds, findings)
+    notes_fn = getattr(decide, "preference_notes", None)
+    if notes_fn:
+        extra = notes_fn(intake, rounds)
+        pref_notes = [*(await extra if inspect.isawaitable(extra) else extra or []), *pref_notes]
     rounds = [r if isinstance(r, dict) else r.model_dump() for r in rounds]
     return Report.model_validate({
         "runId": run_id, "generatedAt": datetime.now(timezone.utc).isoformat(), "intake": intake.model_dump(),
         "summary": summary, "finalAllocation": rounds[-1]["allocation"], "rounds": rounds,
-        "findings": [f.model_dump() for f in findings], "disclaimer": DISCLAIMER})
+        "findings": [f.model_dump() for f in findings], "disclaimer": DISCLAIMER,
+        "preferenceNotes": pref_notes})
 
 
 async def run_pipeline(run_id: str, intake: IntakeInput, emit: Emit) -> Report:

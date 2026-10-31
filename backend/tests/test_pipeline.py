@@ -20,21 +20,21 @@ def F(ids, agent, sym, sent):
 def fakes(monkeypatch):
     seen = {}
 
-    async def discovery(intake, ids, on_step=None):
+    async def discovery(intake, ids, on_step=None, **kw):
         await on_step({"query": "AI stocks"})
         return [Candidate(symbol="NVDA", name="Nvidia", assetClass="STOCKS"),
                 Candidate(symbol="GLD", name="Gold", assetClass="GOLD")], [F(ids, "DISCOVERY", "NVDA", "POSITIVE")]
 
-    async def financials(stocks, ids, on_step=None):
+    async def financials(stocks, ids, on_step=None, **kw):
         return {"NVDA": (8.0, "good")}, [F(ids, "FINANCIALS", "NVDA", "POSITIVE")]
 
-    async def landscape(syms, ids, on_step=None):
+    async def landscape(syms, ids, on_step=None, **kw):
         return [F(ids, "LANDSCAPE", "NVDA", "NEUTRAL")]
 
-    async def news(syms, ids, on_step=None):
+    async def news(syms, ids, on_step=None, **kw):
         return [F(ids, "NEWS", "NVDA", "NEGATIVE")]
 
-    async def social(syms, ids, on_step=None):
+    async def social(syms, ids, on_step=None, **kw):
         return {"NVDA": 0.5}, [F(ids, "SOCIAL", "NVDA", "POSITIVE")]
 
     for fn in (discovery, financials, landscape, news, social):
@@ -85,3 +85,20 @@ def test_failing_agent_does_not_stop_run(fakes, monkeypatch):
     report, events = go()
     assert ("agent.failed", "NEWS") in [(e["type"], e.get("agent")) for e in events]
     assert isinstance(report, Report) and all(f.agent != "NEWS" for f in report.findings)
+
+
+def test_preference_notes_from_decide_plus_discovery_notes(fakes, monkeypatch):
+    async def discovery(intake, ids, on_step=None, notes_out=None, **kw):
+        notes_out.append("Requested ZZZ could not be resolved")
+        return [Candidate(symbol="NVDA", name="Nvidia", assetClass="STOCKS", isUserRequested=True)], []
+
+    monkeypatch.setattr(agents, "discovery", discovery)
+    sys.modules["app.decide"].preference_notes = lambda intake, rounds: ["Honoured MEME style"]
+    report, _ = go()
+    assert report.preferenceNotes == ["Honoured MEME style", "Requested ZZZ could not be resolved"]
+    assert fakes["cands"][0].isUserRequested is True
+
+
+def test_preference_notes_default_empty_when_decide_has_none(fakes):
+    report, _ = go()
+    assert report.preferenceNotes == []

@@ -6,6 +6,7 @@ Provides prices, fundamentals, existence resolution, and caching.
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 import logging
 import os
 import time
@@ -217,6 +218,69 @@ def resolve(symbol: str) -> bool:
         return False
 
 
+_YAHOO_ROWS = {
+    "revenue": ("financials", ("Total Revenue", "Operating Revenue")),
+    "gross_profit": ("financials", ("Gross Profit",)),
+    "operating_income": ("financials", ("Operating Income", "Total Operating Income As Reported")),
+    "net_income": ("financials", ("Net Income", "Net Income Common Stockholders")),
+    "shares_diluted": ("financials", ("Diluted Average Shares",)),
+    "cfo": ("cashflow", ("Operating Cash Flow", "Cash Flow From Continuing Operating Activities")),
+    "capex": ("cashflow", ("Capital Expenditure",)),
+    "total_debt": ("balance_sheet", ("Total Debt",)),
+    "cash": ("balance_sheet", ("Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments")),
+}
+SANITY_FIELDS = ("cfo", "total_debt", "cash")
+SANITY_TOL = 0.25
+
+
+def _yahoo_fields(ticker: Any) -> dict[str, float | None]:
+    """Latest annual statement values from yfinance for the SEC field names ({} on any failure)."""
+    out: dict[str, float | None] = {}
+    for field, (attr, names) in _YAHOO_ROWS.items():
+        try:
+            df = getattr(ticker, attr)
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                continue
+            for name in names:
+                if name in df.index:
+                    vals = df.loc[name].dropna()
+                    if not vals.empty:
+                        v = float(vals.iloc[0])  # columns are newest-first
+                        out[field] = abs(v) if field == "capex" else v
+                        break
+        except Exception as exc:
+            logger.warning("yahoo %s lookup failed: %s", attr, exc)
+    return out
+
+
+def merge_fundamentals(sec: dict[str, Any], yahoo: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+    """SEC first; yahoo fills missing/zero fields and wins when cfo/debt/cash disagree (sign or >25%)."""
+    merged: dict[str, Any] = {}
+    source: dict[str, str] = {}
+    for f in SEC_FIELDS:
+        s, y = sec.get(f), yahoo.get(f)
+        y_ok = y is not None and y != 0
+        if s is None or s == 0:
+            merged[f], source[f] = (y, "yahoo") if y_ok else (s, "sec")
+        elif f in SANITY_FIELDS and y_ok and ((s < 0) != (y < 0) or abs(s - y) / abs(y) > SANITY_TOL):
+            logger.warning("SEC %s=%s disagrees with yahoo %s; using yahoo", f, s, y)
+            merged[f], source[f] = y, "yahoo"
+        else:
+            merged[f], source[f] = s, "sec"
+    return merged, source
+
+
+@lru_cache(maxsize=256)
+def company_info(symbol: str) -> dict[str, str]:
+    """sector / industry / longName from yfinance (lower-cased), {} if unavailable. Used for exclusion filters."""
+    try:
+        import yfinance as yf
+        info = yf.Ticker(symbol.strip().upper()).info or {}
+        return {k: str(info.get(k) or "").lower() for k in ("sector", "industry", "longName")}
+    except Exception:
+        return {}
+
+
 def _fetch_fundamentals(symbol: str) -> dict[str, Any]:
     sym = symbol.strip().upper()
     clean_sym = sym[:-3] if sym.endswith(".US") else sym
@@ -243,9 +307,12 @@ def _fetch_fundamentals(symbol: str) -> dict[str, Any]:
 
     result["asOf"] = as_of or pd.Timestamp.now().strftime("%Y-%m-%d")
 
-    # yfinance valuation fields
+    # yfinance: fills missing SEC fields (e.g. 20-F filers), sanity-checks cfo/debt/cash, adds valuation fields
+    result["source"] = {f: "sec" for f in SEC_FIELDS}
     try:
         ticker = yf.Ticker(clean_sym)
+        merged, result["source"] = merge_fundamentals(result, _yahoo_fields(ticker))
+        result.update(merged)
         info = getattr(ticker, "info", None) or {}
         pe = info.get("trailingPE")
         result["trailingPE"] = float(pe) if pe is not None and pd.notna(pe) else None
