@@ -1,4 +1,6 @@
 import asyncio
+
+import pytest
 from itertools import count
 from types import SimpleNamespace
 
@@ -7,6 +9,14 @@ from app.models import Candidate, IntakeInput
 
 INTAKE = IntakeInput(amountUsd=10000, horizonYears=2, riskTolerance="MODERATE", theme="AI")
 SRC = [{"title": f"t{i}", "url": f"http://x/{i}"} for i in range(5)]
+
+
+@pytest.fixture(autouse=True)
+def _no_thin_universe_logic(monkeypatch):
+    """Pre-Wave-8A tests assume exactly one Discovery call and no extra bonds; thin-universe tests opt back in."""
+    monkeypatch.setattr(agents, "MIN_STOCKS", 0)
+    monkeypatch.setattr(agents, "MIN_THIN", 0)
+    monkeypatch.setattr(agents, "MIN_HOLDINGS", 0)
 
 
 def fake_ask(payload):
@@ -421,3 +431,71 @@ def test_horizon_rendering_and_short_horizon_hint(monkeypatch):
     run(agents.discovery(INTAKE.model_copy(update={"horizonYears": 2}), count(1)))
     assert "3-month horizon" in prompts[0] and "capital preservation" in prompts[0]
     assert "2-year horizon" in prompts[1] and "capital preservation" not in prompts[1]
+
+
+# ---------------- Wave 8A: restricted universes stay diversified ----------------
+def _thin(monkeypatch, risk="MODERATE", only_industry="Biotechnology", theme="AI infrastructure", second=None):
+    """Discovery under an 'only <industry>' rule whose first pass finds just 2 matching stocks."""
+    monkeypatch.setattr(agents, "MIN_STOCKS", 6)
+    monkeypatch.setattr(agents, "MIN_THIN", 4)
+    monkeypatch.setattr(agents, "MIN_HOLDINGS", 4)
+    _bond_prices(monkeypatch)
+    info = {s: {"sector": "healthcare", "industry": "biotechnology", "country": "united states", "longName": s.lower()}
+            for s in ("RXRX", "ABSI", "AMGN", "GILD", "REGN", "VRTX", "BIIB", "MRNA")}
+    info["NVDA"] = {"sector": "technology", "industry": "semiconductors", "country": "united states", "longName": "nvidia"}
+    monkeypatch.setattr(data, "company_info", lambda s: info.get(s, {}))
+    prompts = []
+
+    async def ask(**kw):
+        prompts.append(kw["input"])
+        first = len(prompts) == 1
+        picks = [P("RXRX"), P("ABSI"), P("NVDA")] if first else [P(x) for x in (second or ["AMGN", "GILD", "REGN", "VRTX", "NVDA", "RXRX"])]
+        return SimpleNamespace(data=agents.DiscoveryOut(picks=picks), sources=SRC, citations=[])
+    monkeypatch.setattr(llm, "ask", ask)
+    intake = INTAKE.model_copy(update={"riskTolerance": risk, "theme": theme, "horizonYears": 0.25,
+                                       "preferences": Preferences(onlyInclude=["biotech"], exclude=["gold"])})
+    rp = ResolvedPreferences(only=Filter(industries=[only_industry]), exclude=Filter(assetClasses=["GOLD"]))
+    notes = []
+    cands, fs = run(agents.discovery(intake, count(1), notes_out=notes, rp=rp))
+    return cands, notes, prompts, fs
+
+
+def test_thin_universe_triggers_exactly_one_extra_pass_and_merges(monkeypatch):
+    cands, notes, prompts, _ = _thin(monkeypatch)
+    assert len(prompts) == 2 and "List 8-10 liquid, established" in prompts[1] and "Biotechnology" in prompts[1]
+    stocks = [c.symbol for c in cands if c.assetClass == "STOCKS"]
+    assert stocks == ["RXRX", "ABSI", "AMGN", "GILD", "REGN", "VRTX"]       # NVDA filtered, RXRX not duplicated
+    assert not any("thin" in n for n in notes)                              # 6 >= 4: no thin warning
+
+
+def test_enough_stocks_means_no_extra_pass(monkeypatch):
+    monkeypatch.setattr(agents, "MIN_STOCKS", 2)
+    _bond_prices(monkeypatch)
+    prompts = _capture(monkeypatch, agents.DiscoveryOut(picks=[P("NVDA"), P("AVGO")]))
+    run(agents.discovery(INTAKE.model_copy(update={"riskTolerance": "AGGRESSIVE"}), count(1)))
+    assert len(prompts) == 1
+
+
+def test_theme_is_context_not_a_requirement_when_only_is_set(monkeypatch):
+    _, _, prompts, _ = _thin(monkeypatch)
+    assert "theme: AI infrastructure" not in prompts[0]
+    assert "do NOT narrow the ONLY rule" in prompts[0] and "also related to AI infrastructure if possible" in prompts[0]
+
+
+def test_theme_still_a_requirement_without_only(monkeypatch):
+    _bond_prices(monkeypatch)
+    prompts = _capture(monkeypatch, agents.DiscoveryOut(picks=[]))
+    run(agents.discovery(INTAKE, count(1)))
+    assert "theme: AI" in prompts[0]
+
+
+def test_thin_universe_adds_second_bond_and_notes_when_still_thin(monkeypatch):
+    cands, notes, _, _ = _thin(monkeypatch, second=["NVDA"])               # extra pass finds nothing usable
+    assert [c.symbol for c in cands if c.assetClass == "BONDS"] == ["SHY", "BIL"]   # lowest drawdown first
+    assert any("universe is thin" in n and "2 matching stock" in n for n in notes)
+    assert len(cands) * 25 >= 100
+
+
+def test_healthy_universe_keeps_single_bond(monkeypatch):
+    cands, *_ = _thin(monkeypatch)                                          # 6 stocks after the extra pass
+    assert len([c for c in cands if c.assetClass == "BONDS"]) == 1

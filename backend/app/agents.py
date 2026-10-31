@@ -207,6 +207,9 @@ async def bond_picks(exclude: set[str], n: int, ok=None, skipped: list | None = 
     return out
 
 
+MIN_STOCKS = 6   # fewer allowed stock candidates than this triggers one extra Discovery pass
+MIN_HOLDINGS = 4  # 25% max per holding => at least 4 candidates so the cap is feasible
+MIN_THIN = 4     # still fewer than this after the pass: tell the user the universe is thin
 STYLE_HINTS = {
     "MEME": "meme coins (e.g. DOGE, SHIB, PEPE, WIF, BONK) and meme-popular stocks",
     "DIVIDEND": "reliable dividend payers",
@@ -257,10 +260,13 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
             return "at least 5 (all matching the ONLY filter)"
         return default
 
+    restricted = not rp.only.is_empty() and preferences._only_covers(rp.only, "STOCKS")
+    theme_line = ((f"optional context (do NOT narrow the ONLY rule with it): also related to {intake.theme} if possible." if intake.theme
+                   else "no theme.") if restricted else f"theme: {intake.theme or 'none (broad diversified growth)'}.")
     prompt = (
         f"You are the Discovery analyst. {_context(notes)}\n"
         f"Investor: ${intake.amountUsd:,.0f}, {horizon_text(intake.horizonYears)} horizon, "
-        f"{intake.riskTolerance} risk, theme: {intake.theme or 'none (broad diversified growth)'}.\n"
+        f"{intake.riskTolerance} risk, " + theme_line + "\n"
         + (f"{SHORT_HORIZON_HINT}\n" if intake.horizonYears <= 1 else "")
         + (f"Resolved preferences (hard rules): {preferences.prompt_text(rp)}\n" if preferences.prompt_text(rp) else "")
         + f"Run 2-3 Google searches, then pick {count_txt('STOCKS', '4-6')} stocks (mix of leaders plus small/mid caps or suppliers) and "
@@ -275,19 +281,24 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
     res = await llm.ask(model=FLASH, input=prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY",
                         on_step=on_step, generation_config=LOW)
     cands, raws = [], []
-    for p in res.data.picks:
-        sym = p.symbol.strip().upper()
-        if any(c.symbol == sym for c in cands):
-            continue
-        if not await asyncio.to_thread(data.resolve, sym):
-            await _notify(on_step, f"Dropped {sym}: no market data found")
-            continue
-        good, why = await _ok(sym, rp, p.name)
-        if not good:
-            await _notify(on_step, f"Dropped {sym}: {why}")
-            continue
-        cands.append(Candidate(symbol=sym, name=p.name, assetClass=preferences.asset_class(sym), isUserRequested=sym in must))
-        raws.append(RawFinding(symbol=sym, claim=p.thesis, sentiment="POSITIVE"))
+
+    async def take(picks) -> None:
+        """Resolve + preference-filter picks and append them to cands/raws (deduped)."""
+        for p in picks:
+            sym = p.symbol.strip().upper()
+            if any(c.symbol == sym for c in cands):
+                continue
+            if not await asyncio.to_thread(data.resolve, sym):
+                await _notify(on_step, f"Dropped {sym}: no market data found")
+                continue
+            good, why = await _ok(sym, rp, p.name)
+            if not good:
+                await _notify(on_step, f"Dropped {sym}: {why}")
+                continue
+            cands.append(Candidate(symbol=sym, name=p.name, assetClass=preferences.asset_class(sym), isUserRequested=sym in must))
+            raws.append(RawFinding(symbol=sym, claim=p.thesis, sentiment="POSITIVE"))
+
+    await take(res.data.picks)
     for sym in must:  # user-requested symbols are always candidates, if they exist
         if any(c.symbol == sym for c in cands):
             continue
@@ -310,6 +321,27 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
         if msg := _skip_note("defensive ballast", skipped, len(picks), want):
             note(msg)
 
+    n_stocks = lambda: sum(1 for c in cands if c.assetClass == "STOCKS")  # noqa: E731
+    if n_stocks() < MIN_STOCKS and targets.get("STOCKS") != 0 and "STOCKS" not in rp.exclude.assetClasses:
+        # thin universe: ONE focused extra pass for liquid, established names that still pass the same filters
+        criteria = (preferences.describe(rp.only) or "; ".join(rp.interpretations) or intake.theme or
+                    f"a {intake.riskTolerance.lower()}-risk investor")
+        extra_prompt = (
+            f"You are the Discovery analyst. {_context(notes)}\n"
+            f"List 8-10 liquid, established (prefer large/mid-cap, profitable where possible) stocks matching: {criteria}. "
+            f"Already chosen (do not repeat): {', '.join(c.symbol for c in cands) or 'none'}. "
+            + (f"Resolved preferences (hard rules): {preferences.prompt_text(rp)} " if preferences.prompt_text(rp) else "")
+            + (f"Optional context: also related to {intake.theme} if possible. " if intake.theme else "")
+            + "Symbols in yfinance form. One-sentence thesis per pick (at most 25 words, dated figures only)."
+        )
+        await _notify(on_step, f"Only {n_stocks()} matching stocks so far; searching for more")
+        res2 = await llm.ask(model=FLASH, input=extra_prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY",
+                             on_step=on_step, generation_config=LOW)
+        await take([p for p in res2.data.picks if p.assetClass == "STOCKS"])
+        if n_stocks() < MIN_THIN:
+            note(f"Your preferred universe is thin: only {n_stocks()} matching stock(s) could be found, so the portfolio leans on "
+                 "bonds and other allowed assets and may be less diversified.")
+
     bond_target = targets.get("BONDS")
     n_bonds = {"CONSERVATIVE": 2, "MODERATE": 1}.get(intake.riskTolerance, 0)
     if "DEFENSIVE" in styles:
@@ -327,6 +359,19 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
             raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
                                    claim=f"Added as bond ballast for a {intake.riskTolerance} profile (5y max drawdown {dd}%)."))
         if msg := _skip_note("bond ballast", skipped, len(picks), n_bonds - have):
+            note(msg)
+
+    # 25% max per holding => need >= 4 holdings; a thin stock universe gets a 2nd bond ETF so the cap stays feasible
+    bonds_now = sum(1 for c in cands if c.assetClass == "BONDS")
+    want_bonds = max(2 if n_stocks() < MIN_THIN else 0, MIN_HOLDINGS - len(cands) - 1 + bonds_now)  # -1: gold may still be added
+    if targets.get("BONDS") != 0 and want_bonds > bonds_now:
+        skipped = []
+        picks = await bond_picks({c.symbol for c in cands}, want_bonds - bonds_now, ok, skipped)
+        for sym, name, dd in picks:
+            cands.append(Candidate(symbol=sym, name=name, assetClass="BONDS"))
+            raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
+                                   claim=f"Added as bond ballast so no holding needs to exceed 25% (5y max drawdown {dd}%)."))
+        if msg := _skip_note("bond ballast", skipped, len(picks), want_bonds - bonds_now):
             note(msg)
 
     if not any(c.assetClass == "GOLD" for c in cands):
