@@ -381,3 +381,10 @@ def test_notes_mention_bonds(fake, monkeypatch):
     notes = decide.preference_notes(intake, rounds)
     assert any(n.startswith("Bonds target 20% met at 35%") for n in notes) or any("Bonds" in n for n in notes), notes
     assert any(n.startswith("Bonds 35%") and "SHY" in n and "drawdown within -35%" in n for n in notes), notes
+
+
+def test_crypto_cap_can_search_upward_toward_a_target():
+    cands = {c.symbol: c for c in CANDS}
+    w = {"NVDA": 25, "MSFT": 25, "AAPL": 20, "BTC-USD": 5, "GLD": 25}
+    up = decide._crypto_cap(w, cands, closes(), -60.0, hi=40.0)
+    assert up and 5 < up[0] <= 40 and up[1] >= -60.0
