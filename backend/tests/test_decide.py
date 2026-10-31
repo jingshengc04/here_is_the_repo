@@ -64,10 +64,17 @@ def fake(monkeypatch):
             w = ast.literal_eval(re.search(r"\{'.*?\}", input[0]["text"]).group(0))
             c = cl[list(w)]
             m = engine.metrics(engine.equity_curve(c, w), c, w)
+            if state.get("sandbox_sleep"):
+                await asyncio.sleep(state["sandbox_sleep"])
+            out = f'{{"totalReturnPct": {m["totalReturnPct"]}, "maxDrawdownPct": {m["maxDrawdownPct"]}}}'
+            mode = state.get("sandbox_mode", "steps")
             if state.get("sandbox_broken"):
-                return llm.AskResult("", "no json here", [], model, 1, [])
-            return llm.AskResult("", f'```json\n{{"totalReturnPct": {m["totalReturnPct"]}, '
-                                 f'"maxDrawdownPct": {m["maxDrawdownPct"]}}}\n```', [], model, 1, [])
+                return llm.AskResult("", "no json here", [{"type": "code_execution_call", "code": "x"}], model, 1, [])
+            if mode == "text_only":  # hallucinated JSON, no code ran
+                return llm.AskResult("", out, [], model, 1, [])
+            steps = [{"type": "code_execution_call", "code": "print(1)"},
+                     {"type": "code_execution_result", "result": out}]
+            return llm.AskResult("", "done", steps, model, 1, [])
         return llm.AskResult(data, "", [], model, 1, [])
 
     monkeypatch.setattr(decide.llm, "ask", ask)
@@ -162,3 +169,67 @@ def test_round2_prompt_has_computed_crypto_cap(fake):
 def test_cap_projection_zero_weight_free_slots():
     out = decide.project([60.0, 40.0, 0.0, 0.0])
     assert max(out) <= 25.0 and round(sum(out), 1) == 100.0
+
+
+def _res(text="", steps=()):
+    return llm.AskResult("", text, list(steps), "m", 1, [])
+
+
+J = '{"totalReturnPct": 12.5, "maxDrawdownPct": -3.0}'
+
+
+def test_parse_accepts_json_in_code_execution_result():
+    r = _res("prose", [{"type": "code_execution_call", "code": "c"}, {"type": "code_execution_result", "result": J}])
+    assert decide._parse_sandbox(r) == {"totalReturnPct": 12.5, "maxDrawdownPct": -3.0}
+
+
+def test_parse_result_wins_over_prose():
+    fake_json = J.replace("12.5", "99.9")
+    r = _res(fake_json, [{"type": "code_execution_call", "code": "c"}, {"type": "code_execution_result", "result": J}])
+    assert decide._parse_sandbox(r)["totalReturnPct"] == 12.5
+
+
+def test_parse_text_ok_only_if_code_call_exists():
+    ok = _res(J, [{"type": "code_execution_call", "code": "c"}])
+    assert decide._parse_sandbox(ok)["totalReturnPct"] == 12.5
+
+
+def test_parse_text_only_without_code_rejected():
+    with pytest.raises(ValueError, match="did not execute code"):
+        decide._parse_sandbox(_res(J))
+
+
+def test_text_only_json_fails_cross_check_in_run(fake):
+    fake["sandbox_mode"] = "text_only"
+    rounds, _ = run()
+    c = next(c for c in rounds[0].verification.checks if "cross" in c.name.lower())
+    assert not c.isPassed and "did not execute code" in c.detail
+
+
+def test_sandbox_timeout_gives_detail_and_run_continues(fake, monkeypatch):
+    monkeypatch.setattr(decide, "SANDBOX_TIMEOUT_S", 0.05)
+    fake["sandbox_sleep"] = 0.5
+    rounds, events = run()
+    assert len(rounds) == 2 and rounds[0].backtest.crossCheck.isMatch is False
+    c = next(c for c in rounds[0].verification.checks if "cross" in c.name.lower())
+    assert "sandbox timed out after 0.05s; independent numbers shown" in c.detail
+    assert sum("timed out" in e.get("message", "") for e in events if e["type"] == "agent.progress") == 2
+
+
+def test_progress_throttle_dedupes_and_rate_limits():
+    sent, t = [], [0.0]
+
+    async def emit(e):
+        sent.append(e["message"])
+
+    on_step = decide._sandbox_progress(emit, clock=lambda: t[0])
+
+    async def go():
+        for typ in ["code_execution_call", "code_execution_call", "code_execution_result"]:
+            await on_step({"type": typ})  # same instant: only the first passes
+        t[0] = 2.0
+        await on_step({"type": "code_execution_result"})
+        await on_step({"type": "code_execution_result"})  # duplicate message
+
+    asyncio.run(go())
+    assert sent == ["Sandbox: executing Python", "Sandbox: result received"]
