@@ -276,7 +276,7 @@ def company_info(symbol: str) -> dict[str, str]:
     try:
         import yfinance as yf
         info = yf.Ticker(symbol.strip().upper()).info or {}
-        return {k: str(info.get(k) or "").lower() for k in ("sector", "industry", "longName")}
+        return {k: str(info.get(k) or "").lower() for k in ("sector", "industry", "longName", "country", "quoteType")}
     except Exception:
         return {}
 

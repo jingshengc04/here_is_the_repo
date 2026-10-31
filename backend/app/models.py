@@ -21,13 +21,14 @@ class Preferences(BaseModel):
     assetClassTargets: dict[AssetClass, float] | None = None             # e.g. {"CRYPTO": 30}; each 0–100, sum ≤ 100
     styles: list[Style] = Field(default_factory=list, max_length=7)
     notes: str | None = Field(default=None, max_length=500)              # free text every agent reads
+    onlyInclude: list[str] = Field(default_factory=list, max_length=10)  # restrict the universe: ["biotech"], ["European banks"]
 
     @model_validator(mode="after")
     def _targets_ok(self):
         t = self.assetClassTargets or {}
         if any(not 0 <= v <= 100 for v in t.values()) or sum(t.values()) > 100:
             raise ValueError("assetClassTargets must each be 0–100 and sum to at most 100")
-        if any(len(x) > 40 for x in self.mustInclude + self.exclude):
+        if any(len(x) > 40 for x in self.mustInclude + self.exclude + self.onlyInclude):
             raise ValueError("symbols/words must be at most 40 chars")
         return self
 
@@ -275,3 +276,27 @@ class Candidate(BaseModel):
     financialScore: float | None = None   # 1–10, stocks only (FINANCIALS)
     sentimentScore: float | None = None   # -1.0 … 1.0 (SOCIAL + NEWS blend)
     isUserRequested: bool = False         # came from preferences.mustInclude
+
+
+# ---------- Internal: preferences resolved into Yahoo's taxonomy (built by app/preferences.py) ----------
+class Filter(BaseModel):
+    """Canonical filter. Strings match Yahoo profile fields case-insensitively (substring)."""
+    symbols: list[str] = Field(default_factory=list)       # exact tickers, e.g. "NVDA", "DOGE-USD"
+    sectors: list[str] = Field(default_factory=list)       # one of preferences.SECTORS
+    industries: list[str] = Field(default_factory=list)    # Yahoo industry names/fragments, e.g. "Biotechnology"
+    countries: list[str] = Field(default_factory=list)     # e.g. "China", "United States"
+    assetClasses: list[AssetClass] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)      # last resort: substring of the company name
+
+    def is_empty(self) -> bool:
+        return not any((self.symbols, self.sectors, self.industries, self.countries, self.assetClasses, self.keywords))
+
+
+class ResolvedPreferences(BaseModel):
+    """What the user's words mean, in data terms. User preferences beat our defaults; only risk limits push back."""
+    mustInclude: list[str] = Field(default_factory=list)   # resolved tickers
+    prefer: Filter = Field(default_factory=Filter)          # soft: steer discovery and weights toward these
+    only: Filter = Field(default_factory=Filter)            # hard: if non-empty, every holding in the classes it covers must match
+    exclude: Filter = Field(default_factory=Filter)         # hard: no holding may match
+    classTargets: dict[AssetClass, float] = Field(default_factory=dict)  # 0 = class not wanted at all
+    interpretations: list[str] = Field(default_factory=list)  # "'bio stocks' → industry Biotechnology", shown to the user

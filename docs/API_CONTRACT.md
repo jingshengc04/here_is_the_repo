@@ -134,6 +134,7 @@ export interface Preferences {
   assetClassTargets?: Partial<Record<AssetClass, number>> | null; // e.g. {CRYPTO: 30}; each 0–100, sum ≤ 100
   styles?: Style[];
   notes?: string | null;    // ≤ 500 chars free text, e.g. "companies I use every day"
+  onlyInclude?: string[];   // NEW: restrict the universe, any words: ["biotech"], ["European banks"], ["companies I can name"]
 }
 
 export interface IntakeInput {
@@ -331,6 +332,7 @@ Screens (one page, top to bottom, replacing wireframes ① and ②):
 - **Backtest:** line chart of `equityCurve` (4 series) + metrics table; show `crossCheck.isMatch` as a "✓ Verified" badge.
 - **Stream:** native `EventSource`. Handle `onerror` by falling back to polling `GET /api/runs/{runId}` every 3 s.
 - **Mock mode:** with `NEXT_PUBLIC_USE_MOCK=true`, replay the fixture's `rounds` on a timer so the agent lanes, round-1 rejection and round-2 approval all animate. The demo has to work with the backend off.
+- **Personalisation is open-ended.** Users can say anything ("no tech", "only biotech", "no gold", "no Chinese companies", "dividend payers"). The backend maps their words onto Yahoo's sectors, industries, countries and asset classes, and puts how it understood each phrase in `preferenceNotes` (e.g. "'bio stocks' → industry Biotechnology"). Show these notes prominently; that's how the user sees they were understood.
 - **Personalisation:** the confirm card shows `preferences` as editable chips (must include / exclude / styles / class targets / notes). The results page tags holdings with `isUserRequested`, and lists `preferenceNotes` under the summary, so the user sees their wishes were heard even when risk limits capped them.
 - **Retry buttons (frontend-only, no new endpoint):**
   - On `run.failed`, a stream error or a 5xx, show **Try again**, which re-sends `POST /api/runs` with the same intake. On 429, wait 5 seconds and retry.
