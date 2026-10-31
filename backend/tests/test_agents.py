@@ -21,9 +21,9 @@ def run(c):
 
 def test_discovery_drops_unresolved_and_adds_gld(monkeypatch):
     out = agents.DiscoveryOut(picks=[
-        agents.Pick(symbol="NVDA", name="Nvidia", assetClass="STOCKS", thesis="t", risk="r"),
-        agents.Pick(symbol="FAKE", name="Fake", assetClass="STOCKS", thesis="t", risk="r"),
-        agents.Pick(symbol="BTC-USD", name="Bitcoin", assetClass="CRYPTO", thesis="t", risk="r")])
+        agents.Pick(symbol="NVDA", name="Nvidia", assetClass="STOCKS", thesis="t"),
+        agents.Pick(symbol="FAKE", name="Fake", assetClass="STOCKS", thesis="t"),
+        agents.Pick(symbol="BTC-USD", name="Bitcoin", assetClass="CRYPTO", thesis="t")])
     monkeypatch.setattr(llm, "ask", fake_ask(out))
     monkeypatch.setattr(data, "resolve", lambda s: s != "FAKE")
     notes = []
@@ -33,7 +33,7 @@ def test_discovery_drops_unresolved_and_adds_gld(monkeypatch):
     assert any("FAKE" in n["message"] for n in notes)
     assert len({f.id for f in findings}) == len(findings)
     assert all(len(f.sources) <= 3 for f in findings)
-    assert {"NEGATIVE"} <= {f.sentiment for f in findings if f.symbol == "NVDA"}
+    assert [f.symbol for f in findings] == ["NVDA", "BTC-USD", "GLD"]  # exactly 1 per symbol
 
 
 def test_number_gate():
@@ -68,3 +68,31 @@ def test_research_agents_unique_ids(monkeypatch):
     assert sc == {"NVDA": 0.4}
     all_ids = [f.id for f in a + b + c]
     assert all_ids == ["f_1", "f_2", "f_3"] and a[0].agent == "LANDSCAPE" and c[0].agent == "SOCIAL"
+
+
+def test_cap_per_symbol_keeps_one_negative_and_two_max():
+    R = agents.RawFinding
+    raws = [R(symbol="A", claim="1", sentiment="POSITIVE"), R(symbol="A", claim="2", sentiment="NEGATIVE"),
+            R(symbol="A", claim="3", sentiment="NEGATIVE"), R(symbol="A", claim="4", sentiment="NEUTRAL"),
+            R(symbol="B", claim="5", sentiment="POSITIVE")]
+    out = agents.cap_per_symbol(raws)
+    assert [r.claim for r in out] == ["1", "2", "5"]
+    assert sum(r.sentiment == "NEGATIVE" for r in out if r.symbol == "A") == 1
+    assert len(agents.cap_per_symbol(raws, 1)) == 2
+
+
+def test_agent_enforces_cap_trims_claims_and_ranks_sources(monkeypatch):
+    R = agents.RawFinding
+    long_claim = " ".join(["word"] * 40)
+    raws = [R(symbol="NVDA", claim=long_claim, sentiment="NEGATIVE")] + \
+           [R(symbol="NVDA", claim=f"c{i}", sentiment="POSITIVE") for i in range(4)]
+    cites = [{"title": "Unrelated", "url": "http://u/1"}, {"title": "Nvidia risks", "url": "http://u/2"}]
+    res = SimpleNamespace(data=agents.ResearchOut(findings=raws), sources=cites, citations=cites)
+
+    async def ask(**kw):
+        assert kw["generation_config"] == {"thinking_level": "low"}
+        return res
+    monkeypatch.setattr(llm, "ask", ask)
+    fs = run(agents.news(["NVDA"], count(1)))
+    assert len(fs) == 2 and len(fs[0].claim.split()) <= 26
+    assert fs[0].sources[0].url.endswith("/2") and len(fs[0].sources) <= 3
