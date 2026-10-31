@@ -1,0 +1,183 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Full flow: how a portfolio gets built</title><style>
+:root{--ink:#16181d;--mut:#5b6170;--line:#e3e5ea;--bg:#fafaf8;--card:#fff;--ok:#0b8043;--bad:#c5221f;--flash:#1a73e8;--argon:#7b3fe4;--py:#0b8043}
+*{box-sizing:border-box}body{margin:0;font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink);background:var(--bg)}
+main{max-width:1120px;margin:0 auto;padding:36px 24px 90px}h1{font-size:31px;margin:0 0 6px;letter-spacing:-.01em}
+h2{font-size:21px;margin:52px 0 8px;padding-top:16px;border-top:1px solid var(--line)}h3{font-size:16px;margin:22px 0 6px}
+p,li{max-width:880px}.lead{color:var(--mut);font-size:17px}.mut{color:var(--mut)}.small{font-size:12.5px}
+code{font:12.5px ui-monospace,Menlo,monospace;background:#f0f1f4;padding:1px 5px;border-radius:4px}
+table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;font-size:13.5px;margin:8px 0}
+th,td{text-align:left;padding:8px 11px;border-bottom:1px solid var(--line);vertical-align:top}th{background:#f4f5f7;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut)}
+tr:last-child td{border-bottom:0}.r{text-align:right}.num{font-variant-numeric:tabular-nums;white-space:nowrap}.k{font-weight:600;white-space:nowrap}tr.hl td{background:#f6f2fe}
+.ok{color:var(--ok)}.bad{color:var(--bad)}.up{color:var(--ok)}.down{color:var(--bad)}
+.b{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;white-space:nowrap}.pos{background:#e6f4ea;color:var(--ok)}.neg{background:#fce8e6;color:var(--bad)}.neu{background:#eceef1;color:#3c4043}.ask{background:#fef3e0;color:#b06000}
+.m{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:999px;white-space:nowrap}.mf{background:#e8f0fe;color:var(--flash)}.ma{background:#f1eafd;color:var(--argon)}.mp{background:#e6f4ea;color:var(--py)}.mu{background:#eceef1;color:#3c4043}
+.flow{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0}@media(max-width:860px){.flow{grid-template-columns:1fr}}
+.step{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}.step .n{font-size:12px;font-weight:700;color:var(--mut);letter-spacing:.06em}
+.step b{display:block;font-size:15px;margin:2px 0 4px}.step span.d{font-size:13px;color:#30343c;display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 20px;margin:14px 0}
+.io{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:10px 0}.io>div{background:#f7f8fa;border-radius:10px;padding:11px 14px;font-size:13.5px}
+.io b.h{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mut);margin-bottom:4px}@media(max-width:800px){.io{grid-template-columns:1fr}}
+.chat{display:flex;flex-direction:column;gap:8px;max-width:760px}.u,.a{padding:9px 13px;border-radius:12px;font-size:14px;max-width:85%}.u{align-self:flex-end;background:#1a73e8;color:#fff}.a{align-self:flex-start;background:#fff;border:1px solid var(--line)}
+.saved{display:block;margin-top:6px;font-size:12.5px;color:var(--ok);font-weight:600}
+.mono{font:12.5px ui-monospace,Menlo,monospace;background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px 14px;white-space:pre-wrap}
+.note{background:#fff8e6;border:1px solid #f3dca2;border-radius:12px;padding:12px 16px;margin:10px 0}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>Full flow: how a personal portfolio gets built</h1>
+<p class="lead">From the first chat message to the verified report, using <b>one real run</b> on the current code (live Gemini, Yahoo, OKX and SEC data): $15,000, 6 months, Conservative, with personal preferences. 99 seconds, 9 Gemini calls. Section 7 adds a second real run where round 1 was rejected and fixed.</p>
+<p><span class="m mf">Gemini 3.8 Flash</span> <span class="m ma">Gemini 4 Argon</span> <span class="m mp">Python, deterministic</span> <span class="m mu">Frontend (Next.js on Vercel)</span></p>
+
+<h2>At a glance</h2>
+<div class="flow">
+<div class="step"><span class="n">① CHAT</span><b>Intake agent <span class="m mf">Flash</span></b><span class="d">Conversation → amount, horizon (≥ 3 months), risk, and any preferences in the user's own words. Ends each reply with a "Saved: …" line.</span></div>
+<div class="step"><span class="n">② CONFIRM</span><b>Confirm card <span class="m mu">UI</span></b><span class="d">The user checks or edits everything, then presses Run. Nothing starts automatically.</span></div>
+<div class="step"><span class="n">③ UNDERSTAND</span><b>Preference resolver <span class="m mf">Flash</span></b><span class="d">Maps any words onto Yahoo's sectors, industries, countries, asset classes and tickers.</span></div>
+<div class="step"><span class="n">④ DISCOVER</span><b>Discovery <span class="m mf">Flash + Search</span></b><span class="d">Finds matching stocks and coins. Adds requested symbols, bonds and defensive ballast, but only if the user's filters allow them.</span></div>
+<div class="step"><span class="n">⑤ RESEARCH ∥</span><b>Financials · Landscape · News · Social</b><span class="d">4 agents in parallel: SEC numbers in the sandbox, competitors, news and sentiment. Each holding gets a bull and a bear finding with its own sources.</span></div>
+<div class="step"><span class="n">⑥ ALLOCATE</span><b>Orchestrator <span class="m ma">Argon</span></b><span class="d">Proposes weights from the findings, the risk-parity baseline and the user's rules. Python normalises and enforces them.</span></div>
+<div class="step"><span class="n">⑦ BACKTEST ×2</span><b>Sandbox <span class="m mf">code exec</span> + pandas <span class="m mp">Python</span></b><span class="d">The same 5-year backtest computed independently twice. The results must agree within 0.5 percentage points.</span></div>
+<div class="step"><span class="n">⑧ VERIFY</span><b>9 hard checks <span class="m mp">Python</span> + Verifier <span class="m ma">Argon</span></b><span class="d">Fail → Argon writes concrete changes → back to ⑥ (max 2 rounds).</span></div>
+<div class="step"><span class="n">⑨ REPORT</span><b>Summary + notes <span class="m mf">Flash</span></b><span class="d">Pie, holdings, evidence, backtest, how each preference was handled, and plain-English reasons if not approved.</span></div>
+</div>
+
+<h2>① Intake chat <small class="mut">(live conversation from today's testing)</small></h2>
+<div class="chat">
+<div class="u">8000 dollars, aggressive, 2 years</div>
+<div class="a">Anything you specifically want or want to avoid, like certain coins, companies, dividends, or ethical exclusions?</div>
+<div class="u">I hate tech companies and anything Chinese, I want dividends</div>
+<div class="a">We are all set with your $8,000 portfolio over a 2-year horizon with an aggressive risk tolerance. You can review your details and run your portfolio analysis whenever you're ready!<span class="saved">Saved: avoid tech companies, Chinese companies · prefer dividends</span></div>
+</div>
+<ul class="small">
+<li><b>Captures anything:</b> must-include tickers, exclusions (words or tickers), "only …" universes, asset-class targets (0 = none, e.g. "no gold"), styles, and free-text notes.</li>
+<li><b>Horizon:</b> 3 months to 10 years ("3 months" → 0.25).</li>
+<li><b>Risk clashes:</b> if a wish clashes with the risk level, it says so once and offers an alternative.</li>
+<li><b>Never trades:</b> "buy NVDA now" is politely refused.</li>
+<li><b>Truthful confirmation:</b> the green "Saved:" line is generated from the stored data, so the bot can't claim something it didn't save.</li>
+</ul>
+<p><b>The intake for the run on this page</b> (what the confirm card sends to <code>POST /api/runs</code>):</p>
+<div class="mono">{
+ &quot;amountUsd&quot;: 15000.0,
+ &quot;horizonYears&quot;: 0.5,
+ &quot;riskTolerance&quot;: &quot;CONSERVATIVE&quot;,
+ &quot;theme&quot;: null,
+ &quot;preferences&quot;: {
+  &quot;mustInclude&quot;: [
+   &quot;DOGE-USD&quot;
+  ],
+  &quot;exclude&quot;: [
+   &quot;tech companies&quot;,
+   &quot;oil&quot;
+  ],
+  &quot;assetClassTargets&quot;: {
+   &quot;CRYPTO&quot;: 20.0
+  },
+  &quot;styles&quot;: [],
+  &quot;notes&quot;: &quot;I like companies I use every day&quot;,
+  &quot;onlyInclude&quot;: []
+ }
+}</div>
+
+<h2>③ Preference resolver: the user's words → data filters</h2>
+<p>One Flash call translates every phrase into Yahoo Finance's taxonomy. <b>Nothing is hard-coded per preference.</b> The same mechanism handles "only biotech", "no gold", "no Chinese companies" or "companies I use every day". The user sees each interpretation in the report:</p>
+<table><thead><tr><th>Interpretation (shown to the user)</th></tr></thead><tbody><tr><td>&#x27;mustInclude: [&quot;DOGE-USD&quot;]&#x27; -&gt; insisting on symbol DOGE-USD</td></tr><tr><td>&#x27;tech companies&#x27; -&gt; excluding sector Technology</td></tr><tr><td>&#x27;oil&#x27; -&gt; excluding industries Oil &amp; Gas Drilling, Oil &amp; Gas E&amp;P, Oil &amp; Gas Integrated, Oil &amp; Gas Midstream, Oil &amp; Gas Refining &amp; Marketing, Oil &amp; Gas Equipment &amp; Services</td></tr><tr><td>&#x27;assetClassTargets: {&quot;CRYPTO&quot;: 20.0}&#x27; -&gt; targeting 20% in CRYPTO</td></tr><tr><td>&#x27;I like companies I use every day&#x27; -&gt; preferring sectors Consumer Cyclical and Consumer Defensive</td></tr></tbody></table>
+<p class="small mut"><b>Rules:</b> user preferences beat our defaults (gold, bonds, defensive stocks); "must include" beats "exclude"; <b>only risk limits push back, and that's always explained</b>. Everyday words map the way people mean them ("biotech" also covers Yahoo's "Drug Manufacturers", so Amgen and Gilead count; "oil" covers all 6 Oil &amp; Gas industries).</p>
+
+<h2>④ Discovery: who gets considered</h2>
+<div class="io"><div><b class="h">How candidates are found</b>
+<ol class="small" style="margin:0;padding-left:18px">
+<li>Search (Flash + Google, today's date) for names matching the theme, styles and notes.</li>
+<li>Add the <b>must-include</b> symbols (DOGE-USD here).</li>
+<li>Add <b>bond ETFs</b> by data: lowest 5-year drawdown (2 for Conservative, 1 for Moderate).</li>
+<li>Add <b>defensive stocks</b>: lowest 5-year volatility (Conservative/Moderate).</li>
+<li>Add <b>gold</b>.</li>
+<li>If a restricted universe is thin (&lt; 6 stocks), run one extra search for established names.</li>
+</ol></div>
+<div><b class="h">Then every candidate passes one filter</b>Each candidate, our own defaults included, goes through the same <code>allowed()</code> check: excluded? class set to 0%? outside an "only" universe? Anything that fails is dropped with a reason. Here, tech and oil companies were never allowed.</div></div>
+<table><thead><tr><th>Symbol</th><th>Stance</th><th>Claim (exact)</th><th>Sources (matched to this claim)</th></tr></thead><tbody><tr><td class="k">KO</td><td><span class="b pos">bull</span></td><td>Coca-Cola reported 7.6% year-over-year Q3 revenue growth to $13.35 billion on October 29, 2026, demonstrating durable daily demand and pricing power.</td><td class="small">tradingview.com</td></tr><tr><td class="k">WMT</td><td><span class="b pos">bull</span></td><td>Maintaining retail dominance with $713.16 billion in annual revenue as of 2026, Walmart provides conservative stability for a 6-month horizon.</td><td class="small">stocktitan.net</td></tr><tr><td class="k">MCD</td><td><span class="b pos">bull</span></td><td>McDonald&#x27;s held an expansive $182.66 billion market cap and 2.88% dividend yield as of October 30, 2026, anchored by everyday value-menu traffic.</td><td class="small">fool.com</td></tr><tr><td class="k">COST</td><td><span class="b pos">bull</span></td><td>Generating $303.15 billion in annual revenue as of 2026, Costco delivers defensive recurring cash flow supported by high-margin household membership renewals.</td><td class="small">stocktitan.net</td></tr><tr><td class="k">KR</td><td><span class="b pos">bull</span></td><td>Driving $147.64 billion in annual revenue as of 2026, this leader provides conservative low-volatility grocery exposure and capital preservation.</td><td class="small">stocktitan.net</td></tr><tr><td class="k">BTC-USD</td><td><span class="b pos">bull</span></td><td>Holding 60.2% crypto market dominance with a $1.85 trillion market value in late 2026, Bitcoin provides premier liquidity and relative stability.</td><td class="small">coinmarketcap.com, cryptoslate.com</td></tr><tr><td class="k">ETH-USD</td><td><span class="b pos">bull</span></td><td>Capturing a 10.5% crypto market share and over $200 billion capitalization in late 2026, Ethereum serves as the primary everyday settlement layer.</td><td class="small">binance.com, cryptoslate.com</td></tr><tr><td class="k">SOL-USD</td><td><span class="b pos">bull</span></td><td>Generating institutional adoption with sub-second payment settlement and a $70+ billion valuation in 2026, Solana offers deep liquidity for consumer transactions.</td><td class="small">binance.com, solana.com</td></tr><tr><td class="k">DOGE-USD</td><td><span class="b neu">neutral</span></td><td>Included at the investor&#x27;s request.</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">BRK-B</td><td><span class="b neu">neutral</span></td><td>Added as defensive ballast for a CONSERVATIVE profile (5y weekly vol 17.4%).</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">PG</td><td><span class="b neu">neutral</span></td><td>Added as defensive ballast for a CONSERVATIVE profile (5y weekly vol 17.5%).</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">BIL</td><td><span class="b neu">neutral</span></td><td>Added as bond ballast for a CONSERVATIVE profile (5y max drawdown -0.0%).</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">VGSH</td><td><span class="b neu">neutral</span></td><td>Added as bond ballast for a CONSERVATIVE profile (5y max drawdown -5.3%).</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">GLD</td><td><span class="b neu">neutral</span></td><td>Gold is added as a diversifying hedge against equity and crypto drawdowns.</td><td class="small"><span class="mut">—</span></td></tr></tbody></table>
+
+<h2>⑤ Research: 4 agents in parallel</h2>
+<div class="io"><div><b class="h">Financials <span class="m mf">Flash + code execution</span></b>Real SEC 10-K/10-Q numbers (Yahoo fallback for foreign companies; cash flow cross-checked against Yahoo) go into Google's sandbox. Gemini computes margins, cash flow and leverage, then scores each stock 1–10. <b>Every number it states is checked against the data within 2%</b>; missing data is never marked ✓.</div>
+<div><b class="h">Landscape · News · Social <span class="m mf">Flash + Google Search</span></b>Competitors and moat, dated catalysts and risks, Reddit/X sentiment. At most 2 findings per symbol: <b>one bull and one mandatory bear</b>. Each finding is matched to the exact cited passage it came from (79% matched to their own source; the rest use the agent's overall sources).</div></div>
+<h3>Financials (sample)</h3><table><thead><tr><th>Symbol</th><th>Stance</th><th>Claim (exact)</th><th>Sources (matched to this claim)</th></tr></thead><tbody><tr><td class="k">COST</td><td><span class="b pos">bull</span></td><td>Costco demonstrates superior liquidity with a strong net-cash balance sheet, supporting stable capital preservation over a six-month horizon. (Revenue: $303.2B, Net income: $9.2B, P/E: 48.8) <span class="b pos">✓ numbers checked</span></td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">COST</td><td><span class="b neg">bear</span></td><td>A rich trailing valuation creates severe multiple contraction risk if consumer spending weakens significantly in the near term.</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">PG</td><td><span class="b pos">bull</span></td><td>Procter &amp; Gamble offers strong free cash flow and reliable everyday-staples demand, making it suitable for a defensive short-term holding. (Revenue: $87.9B, Net income: $16.0B... <span class="b pos">✓ numbers checked</span></td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">PG</td><td><span class="b neg">bear</span></td><td>Rising input costs and persistent foreign exchange headwinds could compress operating margins over the next six months.</td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">WMT</td><td><span class="b neu">neutral</span></td><td>Walmart provides unmatched scale and strong operating cash flows, though its high multiple limits near-term upside potential. (Revenue: $728.5B, Net income: $22.1B, P/E: 44.8) <span class="b pos">✓ numbers checked</span></td><td class="small"><span class="mut">—</span></td></tr><tr><td class="k">WMT</td><td><span class="b neg">bear</span></td><td>A lofty earnings multiple leaves the stock vulnerable to pullbacks if retail margin expansion stalls.</td><td class="small"><span class="mut">—</span></td></tr></tbody></table>
+<h3>Landscape · News · Social (samples for held symbols)</h3><table><thead><tr><th>Symbol</th><th>Stance</th><th>Claim (exact)</th><th>Sources (matched to this claim)</th></tr></thead><tbody><tr><td class="k">WMT</td><td><span class="b pos">bull</span></td><td>Walmart captured a leading 20.3% share of U.S. grocery spending through September 2026, leveraging automated distribution centers to outperform discount peers.</td><td class="small">andrewdremin.com, mckinsey.com</td></tr><tr><td class="k">WMT</td><td><span class="b neg">bear</span></td><td>Elevated freight capacity expenses and persistent price investments squeeze general merchandise operating margins.</td><td class="small">benzinga.com</td></tr><tr><td class="k">COST</td><td><span class="b pos">bull</span></td><td>Supported by suppliers like packaging producer Packaging Corp of America, Costco expanded its U.S. grocery share to 8.4% by September 2026.</td><td class="small">andrewdremin.com</td></tr><tr><td class="k">WMT</td><td><span class="b neg">bear</span></td><td>Rising logistics investments and cautious consumer discretionary spending continue to squeeze general merchandise profit margins in October 2026.</td><td class="small">tradingview.com, financefeeds.com, coinmarketcap.com</td></tr><tr><td class="k">WMT</td><td><span class="b pos">bull</span></td><td>Grocery and everyday consumable sales gains drove strong foot traffic and digital advertising expansion in October 2026.</td><td class="small">profarmer.com, tikr.com, restaurantdive.com</td></tr><tr><td class="k">COST</td><td><span class="b neg">bear</span></td><td>Elevated membership renewal pricing faced selective consumer resistance across international warehouse club formats in October 2026.</td><td class="small">cryptoticker.io, govinfo.gov, apnews.com</td></tr><tr><td class="k">WMT</td><td><span class="b neg">bear</span></td><td>Valuation bears on Reddit argue that paying elevated multiples above 39x forward earnings offers little margin of safety.</td><td class="small">marketbeat.com</td></tr><tr><td class="k">WMT</td><td><span class="b pos">bull</span></td><td>FinTwit bulls praise Walmart&#x27;s grocery dominance and strong traffic as budget-conscious shoppers trade down.</td><td class="small">marketbeat.com</td></tr><tr><td class="k">COST</td><td><span class="b neg">bear</span></td><td>Analysts on social media warn that Costco trades at an expensive premium multiple exceeding historical retail averages.</td><td class="small">reddit.com, marketbeat.com</td></tr></tbody></table>
+
+<h2>⑥ Orchestrator → allocation</h2>
+<div class="io"><div><b class="h">Input <span class="m ma">Argon</span></b>
+<ul class="small" style="margin:0;padding-left:18px">
+<li>All findings (with ✓ marks)</li>
+<li>Financial and sentiment scores</li>
+<li>The intake, the preference interpretations and filters</li>
+<li>A risk-parity baseline (Vibe-Trading optimizer)</li>
+<li>The rules as numbers: ≤ 25% per holding, effective N ≥ 4, drawdown limit</li>
+<li>Bond ranges (Conservative 30–50%)</li>
+<li>Short-horizon guidance (liquidity, small crypto)</li>
+</ul></div>
+<div><b class="h">Then Python enforces</b>
+<ul class="small" style="margin:0;padding-left:18px">
+<li>Drop anything not allowed</li>
+<li>Must-include ≥ 1%</li>
+<li>Cap each holding at 25% and spread the excess</li>
+<li>Round so the total is exactly 100.0%</li>
+<li>Compute $ amounts</li>
+<li>Drop evidence IDs that don't exist</li>
+</ul></div></div>
+<table><thead><tr><th>Class</th><th>Symbol</th><th class="r">Weight</th><th class="r">$</th><th>Tag</th><th>Why (Orchestrator)</th></tr></thead><tbody><tr><td>STOCKS</td><td class="k">COST</td><td class="r num">8.0%</td><td class="r num">$1,200</td><td></td><td class="small">Costco matches the user&#x27;s everyday consumer preference and boasts our highest financial score (8.0), backed by a net-cash balance sheet and 92%+ membership renewal rates.</td></tr><tr><td>STOCKS</td><td class="k">PG</td><td class="r num">6.0%</td><td class="r num">$900</td><td></td><td class="small">Procter &amp; Gamble delivers reliable everyday-staples demand and $16.0B in net income, providing low-volatility ballast for a conservative profile. Nonetheless, rising inpu</td></tr><tr><td>STOCKS</td><td class="k">WMT</td><td class="r num">6.0%</td><td class="r num">$900</td><td></td><td class="small">Walmart captures over 20% of U.S. grocery spending and generates $728.5B in revenue, offering resilient foot traffic as budget-conscious shoppers trade down. Its lofty 44</td></tr><tr><td>STOCKS</td><td class="k">BRK-B</td><td class="r num">5.0%</td><td class="r num">$750</td><td></td><td class="small">Berkshire Hathaway offers unmatched defensive stability with $85.8B in net income, a 13.6x P/E, and over $300B in cash reserves earning safe Treasury yields. Risks includ</td></tr><tr><td>BONDS</td><td class="k">BIL</td><td class="r num">25.0%</td><td class="r num">$3,750</td><td></td><td class="small">BIL serves as the primary capital-preservation anchor with zero credit-default risk and near-zero historical drawdown over a 6-month horizon. However, successive central </td></tr><tr><td>BONDS</td><td class="k">VGSH</td><td class="r num">24.0%</td><td class="r num">$3,600</td><td></td><td class="small">VGSH complements BIL by providing high sovereign liquidity and daily redemption stability to buffer portfolio drawdowns. That said, unexpected upward shifts in short-term</td></tr><tr><td>CRYPTO</td><td class="k">BTC-USD</td><td class="r num">15.0%</td><td class="r num">$2,250</td><td></td><td class="small">Bitcoin anchors the user&#x27;s targeted crypto allocation with premier institutional liquidity, 60.2% market dominance, and nearly $120 billion in spot ETF assets. Conversely</td></tr><tr><td>CRYPTO</td><td class="k">DOGE-USD</td><td class="r num">1.0%</td><td class="r num">$150</td><td><span class="b ask">you asked</span></td><td class="small">Included at a 1% weight to satisfy the user&#x27;s explicit must-include instruction while benefiting from occasional viral social-media liquidity. Because it lacks fundamenta</td></tr><tr><td>GOLD</td><td class="k">GLD</td><td class="r num">10.0%</td><td class="r num">$1,500</td><td></td><td class="small">Physically backed gold acts as an essential diversifying hedge supported by robust central bank purchases. On the downside, elevated real bond yields and a firmer U.S. do</td></tr></tbody></table>
+
+<h2>⑦ Backtest, computed twice</h2>
+<p><b>Gemini's sandbox</b> receives only the weights plus a CSV of 263 weekly prices (2021-10-22 → 2026-10-30) and writes its own Python. <b>Our server</b> computes the same with pandas and Vibe-Trading's risk x-ray. The sandbox never sees our numbers. This run: sandbox <b>60.2%</b> vs ours <b>60.3%</b>, a match.</p>
+<table><thead><tr><th></th><th class="r">Total return</th><th class="r">CAGR</th><th class="r">Volatility</th><th class="r">Sharpe</th><th class="r">Max drawdown</th></tr></thead><tbody><tr class=hl><td class="k">This portfolio</td><td class="r num">60.3%</td><td class="r num">9.8%</td><td class="r num">10.1%</td><td class="r num">0.98</td><td class="r num">-19.2%</td></tr><tr><td class="k">S&P 500</td><td class="r num">78.3%</td><td class="r num">12.2%</td><td class="r num">16.2%</td><td class="r num">0.79</td><td class="r num">-23.9%</td></tr><tr><td class="k">60/40 stocks/bonds</td><td class="r num">43.4%</td><td class="r num">7.4%</td><td class="r num">10.6%</td><td class="r num">0.73</td><td class="r num">-20.3%</td></tr><tr><td class="k">Equal-weight same holdings</td><td class="r num">83.4%</td><td class="r num">12.8%</td><td class="r num">18.4%</td><td class="r num">0.74</td><td class="r num">-27.9%</td></tr></tbody></table>
+<p class="small mut">Sharpe 95% confidence interval (1,000 bootstrap resamples): <b>0.14 to 1.89</b>. The backtest applies today's weights to the last 5 years; it shows how this mix <i>would have</i> behaved, never what it will do.</p>
+
+<h2>⑧ Verifier: 9 hard checks</h2>
+<p>Python decides pass/fail. Argon only explains failures and writes the requested changes. This run passed everything in round 1:</p>
+<table><thead><tr><th></th><th>Check (Python decides)</th><th>Result</th></tr></thead><tbody><tr><td><b class=ok>✓</b></td><td>Max drawdown within CONSERVATIVE limit (-20%)</td><td>Backtest max drawdown -19.2% vs limit -20%</td></tr><tr><td><b class=ok>✓</b></td><td>Weights sum to 100%</td><td>Holdings sum to 100.0%</td></tr><tr><td><b class=ok>✓</b></td><td>No holding above 25%</td><td>Largest holding is BIL at 25.0%</td></tr><tr><td><b class=ok>✓</b></td><td>Sandbox cross-check matches</td><td>Sandbox return 60.2% vs independent 60.3%</td></tr><tr><td><b class=ok>✓</b></td><td>Sharpe 95% CI above zero</td><td>Sharpe CI lower bound 0.14</td></tr><tr><td><b class=ok>✓</b></td><td>Diversification (effective N &gt;= 4)</td><td>Effective number of positions 5.92</td></tr><tr><td><b class=ok>✓</b></td><td>Bear case documented for every holding</td><td>Every holding has a negative finding</td></tr><tr><td><b class=ok>✓</b></td><td>No holding cites unverified numbers</td><td>All cited numbers verified</td></tr><tr><td><b class=ok>✓</b></td><td>User preferences respected</td><td>Honoured: DOGE-USD held at 1.0%; CRYPTO 16% within 5pp of 20% target</td></tr></tbody></table>
+
+<h2>⑦→⑧ The rebalance loop (a second real run)</h2>
+<p>From this morning's saved run (Conservative, "crypto and AI growth"; that pipeline version had 8 checks). Round 1 was <b class="bad">rejected</b> (drawdown -23.0% vs a -20% limit). The Verifier asked for:</p>
+<ul class="small"><li>Eliminate or cut BTC-USD below 2%: backtest max drawdown -23.0% exceeds CONSERVATIVE limit -20%</li><li>Reduce high-beta semiconductor holdings (NVDA and MU) from 14% combined to below 6%: backtest max drawdown -23.0% exceeds CONSERVATIVE limit -20%</li><li>Trim GEV from 11% to below 5% and reallocate proceeds into defensive value equities (KO, BRK-B) or short-term treasuries: backtest max drawdown -23.0% exceeds CONSERVATIVE limit -20%</li></ul>
+<p>The Orchestrator redid the allocation with the smallest changes that fix the failures. Round 2 was <b class="ok">approved</b> (drawdown -19.7%):</p>
+<div class="grid2"><table><thead><tr><th>Symbol</th><th class="r">Round 1</th><th class="r">Round 2</th><th class="r">Change</th></tr></thead><tbody><tr><td class="k">BRK-B</td><td class="r num">20.0%</td><td class="r num">24.5%</td><td class="r num up">+4.5</td></tr><tr><td class="k">KO</td><td class="r num">18.0%</td><td class="r num">24.5%</td><td class="r num up">+6.5</td></tr><tr><td class="k">GLD</td><td class="r num">20.0%</td><td class="r num">21.5%</td><td class="r num up">+1.5</td></tr><tr><td class="k">MSFT</td><td class="r num">12.0%</td><td class="r num">19.0%</td><td class="r num up">+7.0</td></tr><tr><td class="k">GEV</td><td class="r num">11.0%</td><td class="r num">4.0%</td><td class="r num down">-7.0</td></tr><tr><td class="k">NVDA</td><td class="r num">8.0%</td><td class="r num">3.0%</td><td class="r num down">-5.0</td></tr><tr><td class="k">MU</td><td class="r num">6.0%</td><td class="r num">2.0%</td><td class="r num down">-4.0</td></tr><tr><td class="k">BTC-USD</td><td class="r num">5.0%</td><td class="r num">1.5%</td><td class="r num down">-3.5</td></tr></tbody></table>
+<div class="card small"><b>Loop rules</b>
+<ul style="margin:6px 0 0;padding-left:18px">
+<li>Maximum 2 rounds.</li>
+<li>If round 2 still fails, the report says <b>not approved</b>, with plain-English reasons first. Nothing is forced to pass.</li>
+<li>A failure can go either way: too risky (cut crypto), <i>or</i> not respecting the user (e.g. "you asked for 30% crypto and got 8%", so raise it as far as the risk limit allows).</li>
+</ul></div></div>
+
+<h2>⑨ The report</h2>
+<p><b>Summary</b> (Flash): This conservative, 6-month allocation is anchored by low-risk cash-equivalents and short-term Treasuries (49% across BIL and VGSH), defensive everyday consumer staples (COST, PG, WMT, BRK-B), GLD for hedging, and a capped 16% cryptocurrency allocation featuring BTC-USD and the requested DOGE-USD. In backtesting, the portfolio generated a 60.3% total return (9.8% CAGR) with a maximum drawdown of -19.2%, demonstrating lower volatility and better capital preservation than the S&amp;P 500 (78.3% total return, -23.9% drawdown). The strategy was approved by the Verifier on round 1 with no revisions required, fully adhering to your risk tolerance, asset class targets, and exclusion constraints. However, holding volatile crypto assets alongside an ultra-short time horizon presents real downside risk over six months, and past performance cannot guarantee protection against capital loss.</p>
+<p><b>Preference notes</b> (shown under the summary):</p><ul class="small"><li>&#x27;mustInclude: [&quot;DOGE-USD&quot;]&#x27; -&gt; insisting on symbol DOGE-USD</li><li>&#x27;tech companies&#x27; -&gt; excluding sector Technology</li><li>&#x27;oil&#x27; -&gt; excluding industries Oil &amp; Gas Drilling, Oil &amp; Gas E&amp;P, Oil &amp; Gas Integrated, Oil &amp; Gas Midstream, Oil &amp; Gas Refining &amp; Marketing, Oil &amp; Gas Equipment &amp; Services</li><li>&#x27;assetClassTargets: {&quot;CRYPTO&quot;: 20.0}&#x27; -&gt; targeting 20% in CRYPTO</li><li>&#x27;I like companies I use every day&#x27; -&gt; preferring sectors Consumer Cyclical and Consumer Defensive</li><li>DOGE-USD included at 1.0% as requested</li><li>Crypto target 20% met at 16%</li><li>Bonds 49% (BIL, VGSH): added as ballast to keep your Conservative drawdown within -20%</li></ul>
+<div class="note"><b>When a run is NOT approved</b>, the reasons come first, in plain English. A real example from the "only biotech, no gold, 3 months" run:<br><i>"Your chosen universe (excluding asset class GOLD; only industry Biotechnology) hasn't shown a statistically reliable positive risk-adjusted return over the last 5 years (Sharpe 95% CI -0.09 to 1.66), so this portfolio is not approved. Consider broadening it."</i></div>
+
+<h2>Timeline of this run</h2>
+<table><thead><tr><th class="r">Time</th><th>Event (each is a live SSE event the UI animates)</th></tr></thead><tbody><tr><td class="r num">7s</td><td>Preferences understood</td></tr><tr><td class="r num">7s</td><td>DISCOVERY starts <span class="m mf">gemini-3.8-flash</span></td></tr><tr><td class="r num">26s</td><td>DISCOVERY done: 14 findings (19.3s)</td></tr><tr><td class="r num">26s</td><td>FINANCIALS starts <span class="m mf">gemini-3.8-flash</span></td></tr><tr><td class="r num">26s</td><td>LANDSCAPE starts <span class="m mf">gemini-3.8-flash</span></td></tr><tr><td class="r num">26s</td><td>NEWS starts <span class="m mf">gemini-3.8-flash</span></td></tr><tr><td class="r num">26s</td><td>SOCIAL starts <span class="m mf">gemini-3.8-flash</span></td></tr><tr><td class="r num">50s</td><td>FINANCIALS done: 14 findings (23.8s)</td></tr><tr><td class="r num">54s</td><td>SOCIAL done: 28 findings (27.1s)</td></tr><tr><td class="r num">55s</td><td>LANDSCAPE done: 28 findings (28.8s)</td></tr><tr><td class="r num">55s</td><td>NEWS done: 28 findings (28.9s)</td></tr><tr><td class="r num">56s</td><td>ORCHESTRATOR starts <span class="m ma">gemini-4-argon</span></td></tr><tr><td class="r num">86s</td><td>ORCHESTRATOR done: Round 1 allocation (29.7s)</td></tr><tr><td class="r num">86s</td><td>VERIFIER starts <span class="m ma">gemini-4-argon</span></td></tr><tr><td class="r num">94s</td><td>Verification round 1: <b>APPROVED</b></td></tr><tr><td class="r num">94s</td><td>VERIFIER done: approved (8.2s)</td></tr><tr><td class="r num">99s</td><td>Report delivered (run.completed)</td></tr></tbody></table>
+<p class="small mut">Typical runs take 90–170s and 9–14 Gemini calls (more with a round 2 or a thin-universe extra search). The sandbox step has a 45-second cap: if it's exceeded, our own numbers are shown and the cross-check is marked as failed, never faked.</p>
+
+<h2>Where the data comes from</h2>
+<table><thead><tr><th>Data</th><th>Source</th><th>Via</th></tr></thead><tbody>
+<tr><td class="k">Stocks, ETFs, gold, bonds</td><td>Yahoo Finance (5y weekly)</td><td>Vibe-Trading yfinance loader</td></tr>
+<tr><td class="k">Crypto (incl. meme coins)</td><td>OKX exchange (Yahoo fallback)</td><td>Vibe-Trading OKX loader</td></tr>
+<tr><td class="k">Financial statements</td><td>SEC EDGAR 10-K/10-Q (Yahoo fallback)</td><td>Vibe-Trading SEC loader</td></tr>
+<tr><td class="k">Sector, industry, country</td><td>Yahoo company profile</td><td>Used by the preference filter</td></tr>
+<tr><td class="k">News, competitors, sentiment</td><td>Google Search grounding</td><td>Gemini tool</td></tr>
+<tr><td class="k">Risk metrics, Sharpe CI, risk parity, number checks</td><td>Vibe-Trading code, vendored unmodified (MIT)</td><td>Python</td></tr></tbody></table>
+
+<h2>For the frontend: API and deploy</h2>
+<table><thead><tr><th>Endpoint</th><th>Used for</th></tr></thead><tbody>
+<tr><td class="k"><code>POST /api/intake/messages</code></td><td>Each chat turn (send the full history) → reply, draft intake, isComplete</td></tr>
+<tr><td class="k"><code>POST /api/runs</code></td><td>Run pressed on the confirm card → runId (add <code>?replay=demo_conservative_crypto_ai</code> for the demo fallback)</td></tr>
+<tr><td class="k"><code>GET /api/runs/{id}/events</code></td><td>Live SSE: agent lanes, allocations, backtests, verifications, report</td></tr>
+<tr><td class="k"><code>GET /api/runs/{id}</code></td><td>Snapshot or final report (refresh, or a dropped stream)</td></tr></tbody></table>
+<p class="small">Full types are in <code>docs/API_CONTRACT.md</code>. Backend: <code>https://portfolio-agents-921604373346.europe-west2.run.app</code> (Cloud Run, CORS open).</p>
+<p class="small"><b>Vercel:</b> import the repo, set Root Directory to the frontend folder, add <code>NEXT_PUBLIC_BACKEND_URL</code> = the URL above and <code>NEXT_PUBLIC_USE_MOCK=false</code>, then deploy. The backend lives on the temporary Google account, which is deleted after the hackathon, so record the demo video today.</p>
+
+<h2>Honest limits</h2>
+<ul class="small">
+<li>Backtests use the last 5 years for every horizon and apply today's weights; they aren't predictions.</li>
+<li>Source links are Gemini's redirect URLs (they open the real article), and titles are publisher domains. About 21% of findings fall back to the agent's overall sources.</li>
+<li>Some News search queries still drift to 2024 dates despite today's date being in the prompt; the findings themselves are dated.</li>
+<li>Runs are kept in memory on one Cloud Run instance; a restart loses past runs (saved demo replays survive).</li>
+</ul>
+<p class="small mut">Educational demo. Not financial advice.</p>
+</main></body></html>
