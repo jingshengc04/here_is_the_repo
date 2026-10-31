@@ -5,3 +5,5 @@ __pycache__/
 node_modules/
 .playwright-mcp/
 .impeccable/
+.DS_Store
+backend/data/runs/
