@@ -121,14 +121,16 @@ def _entities(text: str) -> set[str]:
 
 
 def _segments(res) -> list[tuple[str, list[dict]]]:
-    """[(grounded text covered by a citation span, [citations sharing that span])]; [] when offsets/text are missing."""
-    text = getattr(res, "grounded_text", "") or ""
+    """[(grounded text covered by a citation span, [citations sharing that span])]; [] when offsets/text are missing.
+    Gemini's citation offsets are UTF-8 BYTE offsets into the grounded text (verified live: char slicing drifts after
+    any non-ASCII character such as an en dash), so slice the encoded bytes."""
+    text = (getattr(res, "grounded_text", "") or "").encode("utf-8")
     by_span: dict[tuple[int, int], list[dict]] = {}
     for c in getattr(res, "citations", None) or []:
         st, en = c.get("start"), c.get("end")
         if text and isinstance(st, int) and isinstance(en, int) and 0 <= st < en <= len(text):
             by_span.setdefault((st, en), []).append(c)
-    return [(text[st:en], cs) for (st, en), cs in by_span.items()]
+    return [(text[st:en].decode("utf-8", errors="ignore"), cs) for (st, en), cs in by_span.items()]
 
 
 def _span_score(claim: str, seg: str) -> float:
@@ -442,7 +444,10 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None, notes
             note(f"Target {cls} {targets[cls]:g}%: only {have} candidates found, so it may be capped by diversification limits.")
     if (targets.get("BONDS") or 0) > 25 and sum(1 for c in cands if c.assetClass == "BONDS") < 2:
         note("Target BONDS above 25% needs 2+ bond ETFs (25% max per holding), but fewer were available.")
-    return cands, _findings(cap_per_symbol(raws, 1), "DISCOVERY", ids, res)
+    # only the model's own picks cite the search; ballast/gold/requested findings are ours and carry no sources
+    sourced = [r for r in raws if r.sentiment == "POSITIVE"]
+    ours = [r for r in raws if r.sentiment != "POSITIVE"]
+    return cands, _findings(cap_per_symbol(sourced, 1), "DISCOVERY", ids, res) + _findings(cap_per_symbol(ours, 1), "DISCOVERY", ids)
 
 
 _SCALE = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}

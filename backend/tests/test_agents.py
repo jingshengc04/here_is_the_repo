@@ -548,3 +548,28 @@ def test_titles_are_kept_verbatim_never_invented():
     res = _cited_result()
     res.citations[0]["title"] = ""
     assert agents._pick_sources("Vertiv organic orders rose 60% in Q3 2026", "VRT", res)[0]["title"] == ""
+
+
+def test_citation_offsets_are_utf8_bytes_so_non_ascii_text_still_maps():
+    text = "Vertiv \u2013 the cooling leader \u2013 posted record orders. Arista guided revenue to $9.5B on switch demand."
+    b = text.encode()
+    s1 = "Arista guided revenue to $9.5B on switch demand."
+    st = b.index(s1.encode())
+    assert st != text.index(s1)                       # byte offset differs from char offset (the en dashes)
+    cite = {"title": "arista.com", "url": "http://u/anet", "start": st, "end": st + len(s1.encode())}
+    res = SimpleNamespace(grounded_text=text, citations=[cite], sources=[{"title": "x", "url": "http://u/other"}])
+    assert agents._segments(res)[0][0] == s1
+    assert [s["url"] for s in agents._pick_sources("Arista guided revenue to $9.5B", "ANET", res)] == ["http://u/anet"]
+
+
+def test_synthetic_discovery_findings_carry_no_sources(monkeypatch):
+    monkeypatch.setattr(data, "resolve", lambda s: True)
+    out = agents.DiscoveryOut(picks=[P("NVDA")])
+    res = SimpleNamespace(data=out, sources=SRC, citations=[], grounded_text="")
+
+    async def ask(**kw):
+        return res
+    monkeypatch.setattr(llm, "ask", ask)
+    _, fs = run(agents.discovery(INTAKE.model_copy(update={"riskTolerance": "AGGRESSIVE"}), count(1)))
+    by = {f.symbol: f for f in fs}
+    assert by["NVDA"].sources and by["GLD"].sources == []
