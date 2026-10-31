@@ -139,7 +139,7 @@ export interface Preferences {
 
 export interface IntakeInput {
   amountUsd: number;        // 100 – 10_000_000
-  horizonYears: number;     // integer 1 – 10
+  horizonYears: number;     // 0.25 – 10 in steps of 0.25 (0.25 = 3 months, 1.5 = 18 months). Was integer 1–10; whole years still valid
   riskTolerance: RiskTolerance;
   theme?: string;           // optional focus, ≤ 200 chars, e.g. "AI infrastructure"
   preferences?: Preferences | null;  // NEW (optional)
@@ -321,7 +321,7 @@ report page against it before the backend is live.
 ## UI notes for frontend agents
 
 Screens (one page, top to bottom, replacing wireframes ① and ②):
-1. **Onboarding chat**: a chat with the Intake agent (`POST /api/intake/messages`). Its first message is hard-coded in the frontend: *"Hi! How much are you looking to invest, and what are you hoping for?"* When `isComplete`, show the **confirm card** (amount, horizon 1–10, risk toggle, theme; all editable) with a **Run** button. Show 422 `details` inline. If the chat endpoint errors, fall back to the same card as a plain form.
+1. **Onboarding chat**: a chat with the Intake agent (`POST /api/intake/messages`). Its first message is hard-coded in the frontend: *"Hi! How much are you looking to invest, and what are you hoping for?"* When `isComplete`, show the **confirm card** (amount, horizon 3 months–10 years, risk toggle, theme; all editable) with a **Run** button. Show 422 `details` inline. If the chat endpoint errors, fall back to the same card as a plain form.
 2. **Agents at work**: 7 agent lanes that animate live from the stream.
 3. **Results**: the two-level pie, a holdings table (symbol, %, $, scores, rationale), the round-1 → round-2 diff, the backtest chart and metrics, findings with sources, and the disclaimer.
 

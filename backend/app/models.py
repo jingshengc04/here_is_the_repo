@@ -35,7 +35,7 @@ class Preferences(BaseModel):
 
 class IntakeInput(BaseModel):
     amountUsd: float = Field(ge=100, le=10_000_000)
-    horizonYears: int = Field(ge=1, le=10)
+    horizonYears: float = Field(ge=0.25, le=10, multiple_of=0.25)  # 0.25 = 3 months
     riskTolerance: RiskTolerance
     theme: str | None = Field(default=None, max_length=200)
     preferences: Preferences | None = None
@@ -52,7 +52,7 @@ class IntakeTurnRequest(BaseModel):
 
 class IntakeDraft(BaseModel):
     amountUsd: float | None = None
-    horizonYears: int | None = None
+    horizonYears: float | None = None
     riskTolerance: RiskTolerance | None = None
     theme: str | None = None
     preferences: Preferences | None = None

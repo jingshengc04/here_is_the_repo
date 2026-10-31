@@ -14,8 +14,8 @@ from pathlib import Path
 
 from itertools import count
 
-from . import agents
-from .models import Candidate, IntakeInput, Report
+from . import agents, preferences
+from .models import Candidate, IntakeInput, Report, ResolvedPreferences
 
 Emit = Callable[[dict], Awaitable[None]]
 FIXTURE = Path(__file__).parent / "fixtures" / "report.example.json"
@@ -105,11 +105,14 @@ async def _run_agent(emit: Emit, agent: str, model: str, coro_fn):
     return result, findings
 
 
-async def research(intake: IntakeInput, emit: Emit, notes_out: list[str] | None = None) -> tuple[list[Candidate], list]:
+async def research(intake: IntakeInput, emit: Emit, notes_out: list[str] | None = None,
+                   rp: ResolvedPreferences | None = None) -> tuple[list[Candidate], list]:
     """Research phase: DISCOVERY, then FINANCIALS/LANDSCAPE/NEWS/SOCIAL in parallel. Returns (candidates, findings)."""
     ids = count(1)
-    cands, findings = await _run_agent(emit, "DISCOVERY", FLASH, lambda cb: agents.discovery(intake, ids, cb, notes_out=notes_out))
-    notes = intake.preferences.notes if intake.preferences else None
+    cands, findings = await _run_agent(emit, "DISCOVERY", FLASH, lambda cb: agents.discovery(intake, ids, cb, notes_out=notes_out, rp=rp))
+    # every research agent sees the investor's notes AND what their words resolved to (so e.g. 'ethical' gets relevant bear cases)
+    notes = " | ".join(x for x in (intake.preferences.notes if intake.preferences else None,
+                                   preferences.prompt_text(rp) if rp else None) if x) or None
     stocks = [c for c in cands if c.assetClass == "STOCKS"]
     syms = [c.symbol for c in cands]
 
@@ -147,14 +150,22 @@ async def run_real(run_id: str, intake: IntakeInput, emit: Emit) -> Report:
     decide = importlib.import_module("app.decide")
 
     await emit({"type": "run.started", "agents": ["DISCOVERY", *PARALLEL, "ORCHESTRATOR", "VERIFIER"]})
+    try:
+        rp = await preferences.resolve(intake)
+    except Exception as e:  # never fail the run over personalisation, but never pretend it was applied
+        rp = ResolvedPreferences(interpretations=[f"Could not interpret your preferences automatically ({type(e).__name__}), so they were not applied."])
+    if rp.interpretations:
+        await emit({"type": "agent.progress", "agent": "DISCOVERY",
+                    "message": "Understanding your preferences: " + "; ".join(rp.interpretations)[:400]})
     pref_notes: list[str] = []
-    cands, findings = await research(intake, emit, pref_notes)
-    rounds = await decide.decide(intake, cands, findings, emit)
+    cands, findings = await research(intake, emit, pref_notes, rp)
+    kw = {"prefs": rp} if "prefs" in inspect.signature(decide.decide).parameters else {}
+    rounds = await decide.decide(intake, cands, findings, emit, **kw)
     summary = await decide.summarize(intake, rounds, findings)
     notes_fn = getattr(decide, "preference_notes", None)
-    if notes_fn:
-        extra = notes_fn(intake, rounds)
-        pref_notes = [*(await extra if inspect.isawaitable(extra) else extra or []), *pref_notes]
+    extra = notes_fn(intake, rounds) if notes_fn else []
+    extra = await extra if inspect.isawaitable(extra) else extra or []
+    pref_notes = [*rp.interpretations, *extra, *pref_notes]  # interpretations first, then decide's, then Discovery's
     rounds = [r if isinstance(r, dict) else r.model_dump() for r in rounds]
     return Report.model_validate({
         "runId": run_id, "generatedAt": datetime.now(timezone.utc).isoformat(), "intake": intake.model_dump(),
