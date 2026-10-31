@@ -81,7 +81,7 @@ _SENT = {"POSITIVE": 1.0, "NEGATIVE": -1.0, "NEUTRAL": 0.0}
 
 def _step_cb(emit: Emit, agent: str):
     async def cb(step: dict) -> None:
-        msg = step.get("message") or (f"Searching: {step['query']}" if step.get("query")
+        msg = step.get("message") or ((step["query"] if step["query"].lower().startswith("search") else f"Searching: {step['query']}") if step.get("query")
                                       else "Running code analysis" if step.get("code") else None)
         if msg:
             await emit({"type": "agent.progress", "agent": agent, "message": msg})
