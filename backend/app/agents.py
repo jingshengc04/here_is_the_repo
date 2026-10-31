@@ -16,12 +16,13 @@ FLASH = config.MODEL_FLASH
 
 # Adapted from Vibe-Trading research-discipline (bias checklist) - shared by every research prompt.
 DISCIPLINE = (
-    "Research discipline: (1) don't only name mega-caps - include small/mid caps and suppliers; "
-    "(2) ignore concept labels, judge the actual business; (3) for EVERY symbol give at least one "
-    "NEGATIVE (bear-case) finding - search 'risks / problems / bear case'; (4) date every figure "
-    "(e.g. 'Q2 2026') and flag anything older than a year as possibly stale. "
-    "Each claim is ONE sentence. Never invent numbers or sources."
+    "Rules: include small/mid caps and suppliers, not only mega-caps; judge the business, not the concept label; "
+    "date every figure and flag data older than a year; never invent numbers or sources. "
+    "Output at most 2 findings per symbol: exactly 1 NEGATIVE (bear case) and 1 other. "
+    "Each claim is ONE sentence of at most 25 words."
 )
+LOW = {"thinking_level": "low"}  # ponytail: faster Flash for search agents; Financials keeps default thinking
+MAX_WORDS = 25
 
 
 class RawFinding(BaseModel):
@@ -34,8 +35,7 @@ class Pick(BaseModel):
     symbol: str = Field(description="yfinance ticker, e.g. NVDA or BTC-USD")
     name: str
     assetClass: Literal["STOCKS", "CRYPTO"]
-    thesis: str
-    risk: str = Field(description="bear case for this symbol")
+    thesis: str = Field(description="one sentence, at most 25 words")
 
 
 class DiscoveryOut(BaseModel):
@@ -75,22 +75,53 @@ async def _notify(on_step, message: str) -> None:
             await r
 
 
-def _findings(raws, agent, ids: Iterator[int], sources, verified=None) -> list[Finding]:
-    # ponytail: call-level source attribution (every finding gets the call's top 3); citation spans later
-    src = [{"title": s["title"], "url": s["url"]} for s in sources[:3]]
-    return [Finding(id=f"f_{next(ids)}", agent=agent, symbol=r.symbol, claim=r.claim, sentiment=r.sentiment,
-                    sources=src, numbersVerified=(verified or {}).get(i)) for i, r in enumerate(raws)]
+def _trim(claim: str) -> str:
+    w = claim.split()
+    return claim.strip() if len(w) <= MAX_WORDS else " ".join(w[:MAX_WORDS]).rstrip(",;:") + "..."
+
+
+def cap_per_symbol(raws: list[RawFinding], limit: int = 2) -> list[RawFinding]:
+    """<= limit per symbol; when limit > 1 keep exactly one NEGATIVE (if any) plus the first non-negatives."""
+    out, by_sym = [], {}
+    for r in raws:
+        by_sym.setdefault(r.symbol, []).append(r)
+    for rs in by_sym.values():
+        neg = [r for r in rs if r.sentiment == "NEGATIVE"][:1] if limit > 1 else []
+        rest = [r for r in rs if r.sentiment != "NEGATIVE"]
+        keep = neg + rest[: limit - len(neg)]
+        out += [r for r in rs if r in keep]  # preserve original order
+    return out
+
+
+def _pick_sources(claim: str, symbol: str | None, res) -> list[dict]:
+    """Up to 3 sources: citations whose title shares words with the claim first, then call-level sources."""
+    words = {w for w in re.findall(r"[a-z0-9]{4,}", f"{claim} {symbol or ''}".lower())}
+    cites = getattr(res, "citations", None) or []
+    scored = sorted(cites, key=lambda c: -len(words & set(re.findall(r"[a-z0-9]{4,}", c.get("title", "").lower()))))
+    out, seen = [], set()
+    for c in [*scored, *(res.sources or [])]:
+        if c["url"] not in seen and len(out) < 3:
+            seen.add(c["url"])
+            out.append({"title": c.get("title", ""), "url": c["url"]})
+    return out
+
+
+def _findings(raws, agent, ids: Iterator[int], res=None, verified=None) -> list[Finding]:
+    return [Finding(id=f"f_{next(ids)}", agent=agent, symbol=r.symbol, claim=_trim(r.claim), sentiment=r.sentiment,
+                    sources=_pick_sources(r.claim, r.symbol, res) if res is not None else [],
+                    numbersVerified=(verified or {}).get(i)) for i, r in enumerate(raws)]
 
 
 async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None) -> tuple[list[Candidate], list[Finding]]:
     prompt = (
         f"You are the Discovery analyst. Investor: ${intake.amountUsd:,.0f}, {intake.horizonYears}-year horizon, "
         f"{intake.riskTolerance} risk, theme: {intake.theme or 'none (broad diversified growth)'}.\n"
-        "Use Google Search to pick 4-6 stocks and 2-3 cryptocurrencies suited to this theme and risk level. "
-        "Symbols in yfinance form (NVDA, BTC-USD, ETH-USD). Per pick: a one-sentence thesis and one-sentence bear-case risk. "
-        + DISCIPLINE
+        "Run 2-3 Google searches, then pick 4-6 stocks (mix of leaders plus small/mid caps or suppliers) and 2-3 "
+        "cryptocurrencies suited to the theme and risk level. Symbols in yfinance form (NVDA, BTC-USD). "
+        "One-sentence thesis per pick (at most 25 words, dated figures only). No bear-case research."
     )
-    res = await llm.ask(model=FLASH, input=prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY", on_step=on_step)
+    res = await llm.ask(model=FLASH, input=prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY",
+                        on_step=on_step, generation_config=LOW)
     cands, raws = [], []
     for p in res.data.picks:
         sym = p.symbol.strip().upper()
@@ -100,13 +131,11 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None) -> tu
             await _notify(on_step, f"Dropped {sym}: no market data found")
             continue
         cands.append(Candidate(symbol=sym, name=p.name, assetClass=p.assetClass))
-        raws += [RawFinding(symbol=sym, claim=p.thesis, sentiment="POSITIVE"),
-                 RawFinding(symbol=sym, claim=p.risk, sentiment="NEGATIVE")]
+        raws.append(RawFinding(symbol=sym, claim=p.thesis, sentiment="POSITIVE"))
     if not any(c.symbol == "GLD" for c in cands):
         cands.append(Candidate(symbol="GLD", name="SPDR Gold Shares", assetClass="GOLD"))
-        raws += [RawFinding(symbol="GLD", claim="Gold is added as a diversifying hedge against equity and crypto drawdowns.", sentiment="NEUTRAL"),
-                 RawFinding(symbol="GLD", claim="Gold pays no yield and can fall when real interest rates rise.", sentiment="NEGATIVE")]
-    return cands, _findings(raws, "DISCOVERY", ids, res.sources)
+        raws.append(RawFinding(symbol="GLD", claim="Gold is added as a diversifying hedge against equity and crypto drawdowns.", sentiment="NEUTRAL"))
+    return cands, _findings(cap_per_symbol(raws, 1), "DISCOVERY", ids, res)
 
 
 _SCALE = {"": 1.0, "K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
@@ -129,18 +158,17 @@ def number_gate(text: str, fundamentals: dict) -> bool | None:
 
 
 async def financials(stocks: list[Candidate], ids: Iterator[int], on_step=None):
-    funda = {}
-    for c in stocks:
-        funda[c.symbol] = await asyncio.to_thread(data.fundamentals, c.symbol)
+    funda = dict(zip([c.symbol for c in stocks],
+                     await asyncio.gather(*(asyncio.to_thread(data.fundamentals, c.symbol) for c in stocks))))
     prompt = (
         "You are the Financials analyst. Below is fundamentals JSON per stock (TTM from SEC filings plus yfinance P/E; "
-        "values in USD). Use code execution to compute margins (gross/operating/net), leverage (debt vs cash), "
+        "values in USD). Use code execution ONCE (a single script covering all stocks) to compute margins (gross/operating/net), leverage (debt vs cash), "
         "free cash flow (cfo - capex) and valuation (P/E, market cap), then score each stock 1-10 across "
-        "financial health, valuation and earnings quality. Verdict = 1-2 sentences; keyFigures = one line "
-        "'Revenue: $X B, Net income: $Y B, P/E: Z' using ONLY numbers from the data; risk = one bear-case sentence. "
+        "financial health, valuation and earnings quality. Verdict = 1 sentence (at most 25 words); keyFigures = one line "
+        "'Revenue: $X B, Net income: $Y B, P/E: Z' using ONLY numbers from the data; risk = one bear-case sentence (at most 25 words). "
         "Date figures with asOf. " + DISCIPLINE + "\n\n" + llm_json(funda)
     )
-    res = await llm.ask(model=FLASH, input=prompt, schema=FinancialsOut, tools=["code_execution"], agent="FINANCIALS", on_step=on_step)
+    res = await llm.ask(model=FLASH, input=prompt, schema=FinancialsOut, tools=["code_execution"], agent="FINANCIALS", on_step=on_step, generation_config=LOW)
     scores, findings = {}, []
     for s in res.data.stocks:
         sym = s.symbol.strip().upper()
@@ -149,8 +177,8 @@ async def financials(stocks: list[Candidate], ids: Iterator[int], on_step=None):
         ok = number_gate(f"{s.verdict}\n{s.keyFigures}", f)
         sent = "POSITIVE" if s.score >= 7 else "NEGATIVE" if s.score <= 4 else "NEUTRAL"
         findings += _findings([RawFinding(symbol=sym, claim=f"{s.verdict} ({s.keyFigures})", sentiment=sent)],
-                              "FINANCIALS", ids, [], {0: ok})
-        findings += _findings([RawFinding(symbol=sym, claim=s.risk, sentiment="NEGATIVE")], "FINANCIALS", ids, [],
+                              "FINANCIALS", ids, None, {0: ok})
+        findings += _findings([RawFinding(symbol=sym, claim=s.risk, sentiment="NEGATIVE")], "FINANCIALS", ids, None,
                               {0: number_gate(s.risk, f)})
     return scores, findings
 
@@ -161,9 +189,11 @@ def llm_json(d: dict) -> str:
 
 
 async def _search_agent(agent: str, role: str, symbols: list[str], ids, on_step, schema=ResearchOut):
-    prompt = f"You are the {role}. Symbols: {', '.join(symbols)}. Use Google Search. {DISCIPLINE}"
-    res = await llm.ask(model=FLASH, input=prompt, schema=schema, tools=["google_search"], agent=agent, on_step=on_step)
-    return res, _findings(res.data.findings, agent, ids, res.sources)
+    prompt = (f"You are the {role}. Symbols: {', '.join(symbols)}. Use at most 3 Google searches, each covering several "
+              f"symbols. {DISCIPLINE}")
+    res = await llm.ask(model=FLASH, input=prompt, schema=schema, tools=["google_search"], agent=agent,
+                        on_step=on_step, generation_config=LOW)
+    return res, _findings(cap_per_symbol(res.data.findings), agent, ids, res)
 
 
 async def landscape(symbols: list[str], ids: Iterator[int], on_step=None):

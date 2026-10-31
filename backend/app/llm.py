@@ -234,8 +234,10 @@ def _extract_sources(steps: list[Any]) -> list[dict]:
     return deduped
 
 
-async def _execute_call(client: Any, model: str, call_input: Any, tools_param: Any, response_format: Any) -> Any:
+async def _execute_call(client: Any, model: str, call_input: Any, tools_param: Any, response_format: Any, generation_config: Optional[dict] = None) -> Any:
     kwargs: dict[str, Any] = {"model": model, "input": call_input}
+    if generation_config:
+        kwargs["generation_config"] = generation_config
     if tools_param is not None:
         kwargs["tools"] = tools_param
     if response_format is not None:
@@ -256,6 +258,7 @@ async def ask(
     tools: Sequence[str] = (),
     agent: str,
     on_step: Optional[Callable[[dict], Any]] = None,
+    generation_config: Optional[dict] = None,
 ) -> AskResult:
     start_time = time.perf_counter()
     client = get_client()
@@ -275,7 +278,7 @@ async def ask(
 
         for attempt in range(len(delays)):
             try:
-                interaction = await _execute_call(client, active_model, current_input, current_tools, current_resp_fmt)
+                interaction = await _execute_call(client, active_model, current_input, current_tools, current_resp_fmt, generation_config)
                 return interaction, active_model
             except Exception as err:
                 if not _is_retryable_error(err):
@@ -287,7 +290,7 @@ async def ask(
                     if active_model == config.MODEL_ARGON and _is_503(err):
                         # Fall back once to gemini-3.8-flash
                         active_model = config.MODEL_FLASH
-                        interaction = await _execute_call(client, active_model, current_input, current_tools, current_resp_fmt)
+                        interaction = await _execute_call(client, active_model, current_input, current_tools, current_resp_fmt, generation_config)
                         return interaction, active_model
                     raise err
         raise RuntimeError("Retries exhausted without result")
