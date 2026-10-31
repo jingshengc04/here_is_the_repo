@@ -112,13 +112,34 @@ def _findings(raws, agent, ids: Iterator[int], res=None, verified=None) -> list[
                     numbersVerified=(verified or {}).get(i)) for i, r in enumerate(raws)]
 
 
+DEFENSIVE = {"BRK-B": "Berkshire Hathaway", "JNJ": "Johnson & Johnson", "PG": "Procter & Gamble", "KO": "Coca-Cola",
+             "PEP": "PepsiCo", "WMT": "Walmart", "COST": "Costco", "MCD": "McDonald's", "V": "Visa", "MRK": "Merck"}
+
+
+async def defensive_picks(exclude: set[str], n: int = 2) -> list[tuple[str, str, float]]:
+    """The n lowest-weekly-volatility (5y) names from DEFENSIVE not in `exclude`: [(symbol, name, annualised vol %)]."""
+    closes, _missing = await asyncio.to_thread(data.prices, list(DEFENSIVE), 5)  # caches parquet per symbol
+    if closes is None or closes.empty:
+        return []
+    vol = (closes.pct_change().std() * 52 ** 0.5 * 100).dropna().sort_values()
+    out = []
+    for sym, v in vol.items():
+        if sym in exclude or not await asyncio.to_thread(data.resolve, sym):
+            continue
+        out.append((sym, DEFENSIVE[sym], round(float(v), 1)))
+        if len(out) == n:
+            break
+    return out
+
+
 async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None) -> tuple[list[Candidate], list[Finding]]:
     prompt = (
         f"You are the Discovery analyst. Investor: ${intake.amountUsd:,.0f}, {intake.horizonYears}-year horizon, "
         f"{intake.riskTolerance} risk, theme: {intake.theme or 'none (broad diversified growth)'}.\n"
         "Run 2-3 Google searches, then pick 4-6 stocks (mix of leaders plus small/mid caps or suppliers) and 2-3 "
         "cryptocurrencies suited to the theme and risk level. Symbols in yfinance form (NVDA, BTC-USD). "
-        "One-sentence thesis per pick (at most 25 words, dated figures only). No bear-case research."
+        "One-sentence thesis per pick (at most 25 words, dated figures only). No bear-case research. "
+        "Defensive low-volatility large caps (e.g. JNJ, PG) and gold are added automatically afterwards, so focus on the theme."
     )
     res = await llm.ask(model=FLASH, input=prompt, schema=DiscoveryOut, tools=["google_search"], agent="DISCOVERY",
                         on_step=on_step, generation_config=LOW)
@@ -132,6 +153,11 @@ async def discovery(intake: IntakeInput, ids: Iterator[int], on_step=None) -> tu
             continue
         cands.append(Candidate(symbol=sym, name=p.name, assetClass=p.assetClass))
         raws.append(RawFinding(symbol=sym, claim=p.thesis, sentiment="POSITIVE"))
+    if intake.riskTolerance in ("CONSERVATIVE", "MODERATE"):
+        for sym, name, v in await defensive_picks({c.symbol for c in cands}):
+            cands.append(Candidate(symbol=sym, name=name, assetClass="STOCKS"))
+            raws.append(RawFinding(symbol=sym, sentiment="NEUTRAL",
+                                   claim=f"Added as defensive ballast for a {intake.riskTolerance} profile (5y weekly vol {v}%)."))
     if not any(c.symbol == "GLD" for c in cands):
         cands.append(Candidate(symbol="GLD", name="SPDR Gold Shares", assetClass="GOLD"))
         raws.append(RawFinding(symbol="GLD", claim="Gold is added as a diversifying hedge against equity and crypto drawdowns.", sentiment="NEUTRAL"))

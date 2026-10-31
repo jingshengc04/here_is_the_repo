@@ -27,7 +27,7 @@ def test_discovery_drops_unresolved_and_adds_gld(monkeypatch):
     monkeypatch.setattr(llm, "ask", fake_ask(out))
     monkeypatch.setattr(data, "resolve", lambda s: s != "FAKE")
     notes = []
-    cands, findings = run(agents.discovery(INTAKE, count(1), on_step=notes.append))
+    cands, findings = run(agents.discovery(INTAKE.model_copy(update={"riskTolerance": "AGGRESSIVE"}), count(1), on_step=notes.append))
     assert [c.symbol for c in cands] == ["NVDA", "BTC-USD", "GLD"]
     assert cands[-1].assetClass == "GOLD"
     assert any("FAKE" in n["message"] for n in notes)
@@ -96,3 +96,42 @@ def test_agent_enforces_cap_trims_claims_and_ranks_sources(monkeypatch):
     fs = run(agents.news(["NVDA"], count(1)))
     assert len(fs) == 2 and len(fs[0].claim.split()) <= 26
     assert fs[0].sources[0].url.endswith("/2") and len(fs[0].sources) <= 3
+
+
+def _prices(monkeypatch):
+    import numpy as np
+    import pandas as pd
+    idx = pd.date_range("2021-01-01", periods=100, freq="W-FRI")
+    rng = np.random.default_rng(1)
+    vols = {"BRK-B": .03, "JNJ": .01, "PG": .015, "KO": .02, "PEP": .03, "WMT": .04, "COST": .05, "MCD": .06, "V": .07, "MRK": .08}
+    df = pd.DataFrame({k: 100 * np.cumprod(1 + rng.normal(0, v, 100)) for k, v in vols.items()}, index=idx)
+    monkeypatch.setattr(data, "prices", lambda syms, years=5: (df, []))
+    monkeypatch.setattr(data, "resolve", lambda s: True)
+
+
+def _discover(monkeypatch, risk, picks=("NVDA",)):
+    out = agents.DiscoveryOut(picks=[agents.Pick(symbol=s, name=s, assetClass="STOCKS", thesis="t") for s in picks])
+    monkeypatch.setattr(llm, "ask", fake_ask(out))
+    return run(agents.discovery(INTAKE.model_copy(update={"riskTolerance": risk}), count(1)))
+
+
+def test_moderate_adds_two_lowest_vol_defensives(monkeypatch):
+    _prices(monkeypatch)
+    cands, fs = _discover(monkeypatch, "MODERATE")
+    assert [c.symbol for c in cands] == ["NVDA", "JNJ", "PG", "GLD"]
+    assert all(c.assetClass == "STOCKS" for c in cands[1:3])
+    ballast = [f for f in fs if f.symbol == "JNJ"][0]
+    assert "defensive ballast" in ballast.claim and "MODERATE" in ballast.claim and "vol" in ballast.claim
+
+
+def test_aggressive_adds_no_defensives(monkeypatch):
+    _prices(monkeypatch)
+    cands, _ = _discover(monkeypatch, "AGGRESSIVE")
+    assert [c.symbol for c in cands] == ["NVDA", "GLD"]
+
+
+def test_defensive_not_duplicated_when_already_picked(monkeypatch):
+    _prices(monkeypatch)
+    cands, _ = _discover(monkeypatch, "CONSERVATIVE", picks=("NVDA", "JNJ"))
+    syms = [c.symbol for c in cands]
+    assert syms.count("JNJ") == 1 and syms == ["NVDA", "JNJ", "PG", "KO", "GLD"]
